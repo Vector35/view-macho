@@ -1210,6 +1210,28 @@ namespace BinaryNinja
 		std::string name;
 	};
 
+#ifndef EXPORT_SYMBOL_FLAGS_KIND_MASK
+	enum EXPORT_SYMBOL_FLAGS {
+		EXPORT_SYMBOL_FLAGS_KIND_MASK           = 0x03u, ///< Mask to access to EXPORT_SYMBOL_KINDS
+		EXPORT_SYMBOL_FLAGS_WEAK_DEFINITION     = 0x04u,
+		EXPORT_SYMBOL_FLAGS_REEXPORT            = 0x08u,
+		EXPORT_SYMBOL_FLAGS_STUB_AND_RESOLVER   = 0x10u
+	};
+
+	enum EXPORT_SYMBOL_KINDS {
+		EXPORT_SYMBOL_FLAGS_KIND_REGULAR        = 0x00u,
+		EXPORT_SYMBOL_FLAGS_KIND_THREAD_LOCAL   = 0x01u,
+		EXPORT_SYMBOL_FLAGS_KIND_ABSOLUTE       = 0x02u
+	};
+#endif
+
+	struct ExportNode
+	{
+		std::string text;
+		uint64_t offset;
+		uint64_t flags;
+	};
+
 	class MachoView: public BinaryView
 	{
 		uint64_t m_universalImageOffset;
@@ -1242,6 +1264,7 @@ namespace BinaryNinja
 		routines_command_64 m_routines64;
 		function_starts_command m_functionStarts;
 		std::vector<section_64> m_moduleInitSections;
+		linkedit_data_command m_exportTrie;
 		linkedit_data_command m_chainedFixups {};
 
 		std::vector<section_64> m_symbolStubSections;
@@ -1270,6 +1293,10 @@ namespace BinaryNinja
 		bool IsValidFunctionStart(uint64_t addr);
 		void ParseFunctionStarts(Platform* platform);
 		bool ParseRelocationEntry(const relocation_info& info, uint64_t start, BNRelocationInfo& result);
+
+		void ParseExportTrie(BinaryReader& reader);
+		void ReadExportNode(DataBuffer& buffer, std::vector<ExportNode>& results, const std::string& currentText,
+			size_t cursor, uint32_t endGuard);
 
 		void ParseDynamicTable(BinaryReader& reader, BNSymbolType type, uint32_t tableOffset, uint32_t tableSize,
 			BNSymbolBinding binding);

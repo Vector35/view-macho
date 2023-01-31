@@ -192,6 +192,15 @@ static uint64_t readLEB128(DataBuffer& p, size_t end, size_t &offset)
 }
 
 
+uint64_t readValidULEB128(DataBuffer& buffer, size_t& cursor)
+{
+	uint64_t value = readLEB128(buffer, buffer.GetLength(), cursor);
+	if ((int64_t)value == -1)
+		throw ReadException();
+	return value;
+}
+
+
 MachoView::MachoView(const string& typeName, BinaryView* data, bool parseOnly): BinaryView(typeName, data->GetFile(), data),
 	m_universalImageOffset(0), m_parseOnly(parseOnly), m_stringListSize(0), m_relocationBase(0)
 {
@@ -622,6 +631,7 @@ MachoView::MachoView(const string& typeName, BinaryView* data, bool parseOnly): 
 					m_dysymPresent = true;
 					break;
 				case LC_DYLD_CHAINED_FIXUPS:
+					LogDebug("LC_DYLD_CHAINED_FIXUPS\n");
 					m_chainedFixups.dataoff = reader.Read32();
 					m_chainedFixups.datasize = reader.Read32();
 					break;
@@ -638,7 +648,14 @@ MachoView::MachoView(const string& typeName, BinaryView* data, bool parseOnly): 
 					m_dyldInfo.lazy_bind_size = reader.Read32();
 					m_dyldInfo.export_off = reader.Read32();
 					m_dyldInfo.export_size = reader.Read32();
+					m_exportTrie.dataoff = m_dyldInfo.export_off;
+					m_exportTrie.datasize = m_dyldInfo.export_size;
 					m_dyldInfoPresent = true;
+					break;
+				case LC_DYLD_EXPORTS_TRIE:
+					LogDebug("LC_DYLD_EXPORTS_TRIE\n");
+					m_exportTrie.dataoff = reader.Read32();
+					m_exportTrie.datasize = reader.Read32();
 					break;
 				case LC_THREAD:
 				case LC_UNIXTHREAD:
@@ -2185,6 +2202,65 @@ bool MachoView::GetSectionPermissions(uint64_t address, uint32_t &flags)
 	return false;
 }
 
+void MachoView::ParseExportTrie(BinaryReader& reader)
+{
+	try {
+		uint32_t endGuard = m_exportTrie.datasize;
+		DataBuffer buffer = GetParentView()->ReadBuffer(m_universalImageOffset + m_exportTrie.dataoff, m_exportTrie.datasize);
+
+		std::vector<ExportNode> nodes;
+		ReadExportNode(buffer, nodes, "", 0, endGuard);
+
+		for (auto node : nodes)
+		{
+			// LogError("%s: 0x%llx", node.text.c_str(), node.offset);
+			if ((!node.text.empty()))
+			{
+				uint64_t addr = node.offset + GetStart();
+				DefineMachoSymbol(DataSymbol, node.text, addr, GlobalBinding, false);
+			}
+		}
+	}
+	catch (ReadException&)
+	{
+		LogError("Error while parsing Export Trie");
+	}
+}
+
+void MachoView::ReadExportNode(DataBuffer& buffer, std::vector<ExportNode>& results, const std::string& currentText, size_t cursor, uint32_t endGuard)
+{
+	if (cursor > endGuard)
+		throw ReadException();
+
+	uint64_t terminalSize = readValidULEB128(buffer, cursor);
+	if (terminalSize != 0) {
+		uint64_t imageOffset = 0;
+		uint64_t flags = readValidULEB128(buffer, cursor);
+		if (!(flags & EXPORT_SYMBOL_FLAGS_REEXPORT))
+		{
+			imageOffset = readValidULEB128(buffer, cursor);
+			results.push_back({currentText, imageOffset, flags});
+		}
+	}
+	uint8_t childCount = buffer[cursor];
+	cursor++;
+	if (cursor > endGuard)
+		throw ReadException();
+	for (uint8_t i = 0; i < childCount; ++i)
+	{
+		std::string childText;
+		while (buffer[cursor] != 0 & cursor <= endGuard)
+			childText.push_back(buffer[cursor++]);
+		cursor++;
+		if (cursor > endGuard)
+			throw ReadException();
+		auto next = readValidULEB128(buffer, cursor);
+		if (next == 0)
+			throw ReadException();
+		ReadExportNode(buffer, results, currentText + childText, next, endGuard);
+	}
+}
+
 void MachoView::ParseDynamicTable(BinaryReader& reader, BNSymbolType incomingType, uint32_t tableOffset,
 	uint32_t tableSize, BNSymbolBinding binding)
 {
@@ -2308,6 +2384,8 @@ void MachoView::ParseSymbolTable(BinaryReader& reader, const symtab_command& sym
 		ParseDynamicTable(reader, ImportAddressSymbol, m_dyldInfo.lazy_bind_off, m_dyldInfo.lazy_bind_size, GlobalBinding);
 		m_logger->LogDebug("Chained Fixups");
 		ParseChainedFixups();
+		if (m_exportTrie.dataoff)
+			ParseExportTrie(reader);
 
 		//Then process the symtab
 		if (m_stringListSize == 0)
