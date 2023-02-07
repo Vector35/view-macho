@@ -246,8 +246,9 @@ MachoView::MachoView(const string& typeName, BinaryView* data, bool parseOnly): 
 			for (const auto& entry : jsonArchitectures.GetArray())
 				architectures.push_back(entry["architecture"].GetString());
 			auto archPref = Settings::Instance()->Get<vector<string>>("files.universal.architecturePreference");
-			auto result = find_first_of(architectures.begin(), architectures.end(), archPref.begin(), archPref.end());
-			int archIndex = result != architectures.end() ? result - architectures.begin() : 0;
+			int archIndex = 0;
+			if (auto result = find_first_of(archPref.begin(), archPref.end(), architectures.begin(), architectures.end()); result != archPref.end())
+				archIndex = std::find(architectures.begin(), architectures.end(), *result) - architectures.begin();
 
 			const auto& archEntry = jsonArchitectures[archIndex];
 			loadSettings = Settings::Instance(GetUniqueIdentifierString());
