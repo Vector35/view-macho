@@ -10,15 +10,18 @@ First, set the `BN_API_PATH` environment variable to the path containing the
 Binary Ninja API source tree.
 
 Run `cmake`. This can be done either from a separate build directory or from the source
-directory. Once that is complete, run `make` in the build directory to compile the plugin.
+directory. Once that is complete, run `make` (or `ninja`, depending on your default generator) in the build directory to compile the plugin.
 
 The plugin can be found in the root of the build directory as `libview_macho.so`,
 `libview_macho.dylib` or `view_macho.dll` depending on your platform.
 
 To install the plugin, first launch Binary Ninja and uncheck the "Mach-O view plugin"
 option in the "Core Plugins" section. This will cause Binary Ninja to stop loading the
-bundled plugin so that its replacement can be loaded. Once this is complete, you can copy
-the plugin into the user plugins directory (you can locate this by using the "Open Plugin Folder"
+bundled plugin so that its replacement can be loaded. 
+
+Once this is complete, run `make install` (or `ninja install`, depending on the generator used).
+
+You can also manually copy the plugin into the user plugins directory (you can locate this by using the "Open Plugin Folder"
 option in the Binary Ninja UI).
 
 **Do not replace the view plugin in the Binary Ninja install directory. This will be overwritten

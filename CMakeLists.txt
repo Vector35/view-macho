@@ -36,4 +36,6 @@ if(BN_INTERNAL_BUILD)
 	set_target_properties(view_macho PROPERTIES
 		LIBRARY_OUTPUT_DIRECTORY ${BN_CORE_PLUGIN_DIR}
 		RUNTIME_OUTPUT_DIRECTORY ${BN_CORE_PLUGIN_DIR})
+else()
+	bn_install_plugin(view_macho)
 endif()
