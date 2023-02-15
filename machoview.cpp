@@ -1054,494 +1054,10 @@ bool MachoView::Init()
 	else
 		m_imageBaseAdjustment = -(int64_t)(initialImageBase - preferredImageBase);
 
-	for (auto& i : m_header.segments)
-		i.vmaddr += m_imageBaseAdjustment;
-
-	for (auto& i : m_header.sections)
-		i.addr += m_imageBaseAdjustment;
-
-	for (auto& i : m_header.symbolStubSections)
-		i.addr += m_imageBaseAdjustment;
-
-	for (auto& i : m_header.symbolPointerSections)
-		i.addr += m_imageBaseAdjustment;
-
-	for (auto& entryPoint : m_header.entryPoints)
-		entryPoint.first += (entryPoint.second ? 0 : m_imageBaseAdjustment);
-
-	if (m_header.routinesPresent)
-		m_header.routines64.init_address += m_imageBaseAdjustment;
-
-	for (auto& segment : m_header.segments)
-	{
-		if ((segment.initprot == MACHO_VM_PROT_NONE) || (!segment.vmsize))
-			continue;
-
-		if ((segment.initprot & MACHO_VM_PROT_EXECUTE) == MACHO_VM_PROT_EXECUTE)
-		{
-			if ((segment.fileoff == (0 + m_universalImageOffset)) && (segment.filesize != 0))
-				m_header.textBase = segment.vmaddr;
-			for (auto& entryPoint : m_header.entryPoints)
-			{
-				uint64_t val = entryPoint.first + (entryPoint.second ? m_header.textBase : 0);
-				if (find(m_header.m_entryPoints.begin(), m_header.m_entryPoints.end(), val) == m_header.m_entryPoints.end())
-					m_header.m_entryPoints.push_back(val);
-			}
-		}
-	}
-
-	for (auto& segment : m_header.segments)
-	{
-		if ((segment.initprot == MACHO_VM_PROT_NONE) || (!segment.vmsize))
-			continue;
-
-		uint32_t flags = 0;
-		if (segment.initprot & MACHO_VM_PROT_READ)
-			flags |= SegmentReadable;
-		if (segment.initprot & MACHO_VM_PROT_WRITE)
-			flags |= SegmentWritable;
-		if (segment.initprot & MACHO_VM_PROT_EXECUTE)
-			flags |= SegmentExecutable;
-		if (((segment.initprot & MACHO_VM_PROT_WRITE) == 0) && ((segment.maxprot & MACHO_VM_PROT_WRITE) == 0))
-			flags |= SegmentDenyWrite;
-		if (((segment.initprot & MACHO_VM_PROT_EXECUTE) == 0) && ((segment.maxprot & MACHO_VM_PROT_EXECUTE) == 0))
-			flags |= SegmentDenyExecute;
-
-		// if we're positive we have an entry point for some reason, force the segment
-		// executable. this helps with kernel images.
-		for (auto& entryPoint : m_header.m_entryPoints)
-			if (segment.vmaddr <= entryPoint && (entryPoint < (segment.vmaddr + segment.filesize)))
-				flags |= SegmentExecutable;
-
-		AddAutoSegment(segment.vmaddr, segment.vmsize, segment.fileoff, segment.filesize, flags);
-	}
-
-	for (auto& section : m_header.sections)
-	{
-		char sectionName[17];
-		memcpy(sectionName, section.sectname, sizeof(section.sectname));
-		sectionName[16] = 0;
-		m_header.sectionNames.push_back(sectionName);
-	}
-
-	m_header.sectionNames = GetUniqueSectionNames(m_header.sectionNames);
-
-	for (size_t i = 0; i < m_header.sections.size(); i++)
-	{
-		if (!m_header.sections[i].size)
-			continue;
-
-		string type;
-		BNSectionSemantics semantics = DefaultSectionSemantics;
-		switch (m_header.sections[i].flags & 0xff)
-		{
-		case S_REGULAR:
-			if (m_header.sections[i].flags & S_ATTR_PURE_INSTRUCTIONS)
-			{
-				type = "PURE_CODE";
-				semantics = ReadOnlyCodeSectionSemantics;
-			}
-			else if (m_header.sections[i].flags & S_ATTR_SOME_INSTRUCTIONS)
-			{
-				type = "CODE";
-				semantics = ReadOnlyCodeSectionSemantics;
-			}
-			else
-			{
-				type = "REGULAR";
-			}
-			break;
-		case S_ZEROFILL:
-			type = "ZEROFILL";
-			semantics = ReadWriteDataSectionSemantics;
-			break;
-		case S_CSTRING_LITERALS:
-			type = "CSTRING_LITERALS";
-			semantics = ReadOnlyDataSectionSemantics;
-			break;
-		case S_4BYTE_LITERALS:
-			type = "4BYTE_LITERALS";
-			break;
-		case S_8BYTE_LITERALS:
-			type = "8BYTE_LITERALS";
-			break;
-		case S_LITERAL_POINTERS:
-			type = "LITERAL_POINTERS";
-			semantics = ReadOnlyDataSectionSemantics;
-			break;
-		case S_NON_LAZY_SYMBOL_POINTERS:
-			type = "NON_LAZY_SYMBOL_POINTERS";
-			semantics = ReadOnlyDataSectionSemantics;
-			break;
-		case S_LAZY_SYMBOL_POINTERS:
-			type = "LAZY_SYMBOL_POINTERS";
-			semantics = ReadOnlyDataSectionSemantics;
-			break;
-		case S_SYMBOL_STUBS:
-			type = "SYMBOL_STUBS";
-			semantics = ReadOnlyCodeSectionSemantics;
-			break;
-		case S_MOD_INIT_FUNC_POINTERS:
-			type = "MOD_INIT_FUNC_POINTERS";
-			semantics = ReadOnlyDataSectionSemantics;
-			break;
-		case S_MOD_TERM_FUNC_POINTERS:
-			type = "MOD_TERM_FUNC_POINTERS";
-			semantics = ReadOnlyDataSectionSemantics;
-			break;
-		case S_COALESCED:
-			type = "COALESCED";
-			break;
-		case S_GB_ZEROFILL:
-			type = "GB_ZEROFILL";
-			semantics = ReadWriteDataSectionSemantics;
-			break;
-		case S_INTERPOSING:
-			type = "INTERPOSING";
-			break;
-		case S_16BYTE_LITERALS:
-			type = "16BYTE_LITERALS";
-			break;
-		case S_DTRACE_DOF:
-			type = "DTRACE_DOF";
-			break;
-		case S_LAZY_DYLIB_SYMBOL_POINTERS:
-			type = "LAZY_DYLIB_SYMBOL_POINTERS";
-			semantics = ReadOnlyDataSectionSemantics;
-			break;
-		case S_THREAD_LOCAL_REGULAR:
-			type = "THREAD_LOCAL_REGULAR";
-			break;
-		case S_THREAD_LOCAL_ZEROFILL:
-			type = "THREAD_LOCAL_ZEROFILL";
-			break;
-		case S_THREAD_LOCAL_VARIABLES:
-			type = "THREAD_LOCAL_VARIABLES";
-			break;
-		case S_THREAD_LOCAL_VARIABLE_POINTERS:
-			type = "THREAD_LOCAL_VARIABLE_POINTERS";
-			break;
-		case S_THREAD_LOCAL_INIT_FUNCTION_POINTERS:
-			type = "THREAD_LOCAL_INIT_FUNCTION_POINTERS";
-			break;
-		default:
-			type = "UNKNOWN";
-			break;
-		}
-		if (i >= m_header.sectionNames.size())
-			break;
-		if (strncmp(m_header.sections[i].sectname, "__text", sizeof(m_header.sections[i].sectname)) == 0)
-			semantics = ReadOnlyCodeSectionSemantics;
-		if (strncmp(m_header.sections[i].sectname, "__const", sizeof(m_header.sections[i].sectname)) == 0)
-			semantics = ReadOnlyDataSectionSemantics;
-		if (strncmp(m_header.sections[i].sectname, "__data", sizeof(m_header.sections[i].sectname)) == 0)
-			semantics = ReadWriteDataSectionSemantics;
-		if (strncmp(m_header.sections[i].segname, "__DATA_CONST", sizeof(m_header.sections[i].segname)) == 0)
-			semantics = ReadOnlyDataSectionSemantics;
-
-		AddAutoSection(m_header.sectionNames[i], m_header.sections[i].addr, m_header.sections[i].size, semantics, type, m_header.sections[i].align);
-	}
-
-	// Validate architecture
-	if (!m_arch)
-	{
-		// Parse only mode returns true, even if no arch support
-		if (m_parseOnly)
-			return true;
-
-		bool is64Bit;
-		string archName = UniversalViewType::ArchitectureToString(m_archId, 0, is64Bit);
-		if (!archName.empty())
-			m_logger->LogError("Mach-O architecture '%s' is not explicitly supported. Try 'Open with Options' to manually select a compatible architecture.", archName.c_str());
-		else
-			m_logger->LogError("Mach-O architecture 0x%x is not explicitly supported. Try 'Open with Options' to manually select a compatible architecture.", m_archId);
-
+	if (!InitializeHeader(m_header, true))
 		return false;
-	}
 
-	// Apply architecture and platform
 	Ref<Platform> platform = m_plat ? m_plat : g_machoViewType->GetPlatform(0, m_arch);
-	if (!platform)
-		platform = m_arch->GetStandalonePlatform();
-
-	if (m_header.m_entryPoints.size() > 0)
-		platform = platform->GetAssociatedPlatformByAddress(m_header.m_entryPoints[0]);
-
-	if (settings && settings->Contains("loader.platform")) // handle overrides
-	{
-		Ref<Platform> platformOverride = Platform::GetByName(settings->Get<string>("loader.platform", this));
-		if (platformOverride)
-			platform = platformOverride;
-	}
-
-	SetDefaultPlatform(platform);
-	SetDefaultArchitecture(platform->GetArchitecture());
-
-	// Finished for parse only mode
-	if (m_parseOnly)
-		return true;
-
-	// parse thread starts section if available
-	bool rebaseThreadStarts = false;
-	auto theadStartSection = GetSectionByName("__thread_starts");
-	vector<uint32_t> threadStarts;
-	uint64_t stepMultiplier;
-	if (theadStartSection)
-	{
-		size_t count = theadStartSection->GetLength() / 4;
-		threadStarts.reserve(count);
-		virtualReader.Seek(theadStartSection->GetStart());
-		stepMultiplier = virtualReader.Read32() & 0x1 ? 8 : 4;
-		for (uint32_t i = 1; i < count; i++)
-			threadStarts.push_back(virtualReader.Read32());
-
-		rebaseThreadStarts = true;
-		if (settings && settings->Contains("loader.macho.rebaseThreadStarts"))
-			rebaseThreadStarts = settings->Get<bool>("loader.macho.rebaseThreadStarts", this);
-	}
-
-	if (rebaseThreadStarts)
-		RebaseThreadStarts(virtualReader, threadStarts, stepMultiplier);
-
-	vector<Ref<Metadata>> libraries;
-	vector<Ref<Metadata>> libraryFound;
-	for (auto& l : m_header.dylibs)
-	{
-		libraries.push_back(new Metadata(string(l)));
-		Ref<TypeLibrary> typeLib = GetTypeLibrary(l);
-		if (!typeLib)
-		{
-			vector<Ref<TypeLibrary>> typeLibs = platform->GetTypeLibrariesByName(l);
-			if (typeLibs.size())
-			{
-				typeLib = typeLibs[0];
-				AddTypeLibrary(typeLib);
-
-				m_logger->LogDebug("mach-o: adding type library for '%s': %s (%s)",
-						l.c_str(), typeLib->GetName().c_str(), typeLib->GetGuid().c_str());
-			}
-		}
-
-		if (typeLib)
-			libraryFound.push_back(new Metadata(typeLib->GetName()));
-		else
-			libraryFound.push_back(new Metadata(string("")));
-	}
-	StoreMetadata("Libraries", new Metadata(libraries), true);
-	StoreMetadata("LibraryFound", new Metadata(libraryFound), true);
-
-	// Add module Init functions if they exist
-	for (const auto& moduleInitSection : m_header.moduleInitSections)
-	{
-		// ignore mod_init functions that are rebased as part of thread starts
-		if (find(threadStarts.begin(), threadStarts.end(), moduleInitSection.offset) != threadStarts.end())
-			continue;
-
-		// The mod_init section contains a list of function pointers called at initialization
-		// if we don't have a defined entrypoint then use the first one in the list as the entrypoint
-		size_t i = 0;
-		reader.Seek(moduleInitSection.offset);
-		for (; i < (moduleInitSection.size / m_addressSize); i++)
-		{
-			uint64_t target = (m_addressSize == 4) ? reader.Read32() : reader.Read64();
-			target += m_imageBaseAdjustment;
-			Ref<Platform> targetPlatform = platform->GetAssociatedPlatformByAddress(target);
-			DefineMachoSymbol(FunctionSymbol, "mod_init_func_" + to_string(i), target, GlobalBinding, false);
-			AddEntryPointForAnalysis(targetPlatform, target);
-		}
-	}
-
-	bool first = true;
-	for (auto entry : m_header.m_entryPoints)
-	{
-		AddEntryPointForAnalysis(platform, entry);
-		if (first)
-		{
-			first = false;
-			DefineAutoSymbol(new Symbol(FunctionSymbol, "_start", entry));
-		}
-	}
-
-	vector<uint32_t> indirectSymbols;
-	try
-	{
-		// Handle indirect symbols
-		if (m_header.dysymtab.nindirectsyms)
-		{
-			indirectSymbols.resize(m_header.dysymtab.nindirectsyms);
-			reader.Seek(m_header.dysymtab.indirectsymoff);
-			reader.Read(&indirectSymbols[0], m_header.dysymtab.nindirectsyms * sizeof(uint32_t));
-		}
-	}
-	catch (ReadException&)
-	{
-		m_logger->LogError("Failed to read indirect symbol data");
-	}
-
-	BeginBulkModifySymbols();
-	m_symbolQueue = new SymbolQueue();
-
-	try
-	{
-		// Add functions for all function symbols
-		m_logger->LogDebug("Parsing symbol table\n");
-		ParseSymbolTable(reader, m_header, m_header.symtab, indirectSymbols);
-	}
-	catch (std::exception&)
-	{
-		m_logger->LogError("Failed to parse symbol table!");
-	}
-
-	m_symbolQueue->Process();
-	delete m_symbolQueue;
-	m_symbolQueue = nullptr;
-
-	EndBulkModifySymbols();
-
-	bool parseFunctionStarts = true;
-	if (settings && settings->Contains("loader.macho.processFunctionStarts"))
-		parseFunctionStarts = settings->Get<bool>("loader.macho.processFunctionStarts", this);
-
-	if (parseFunctionStarts)
-	{
-		m_logger->LogDebug("Parsing function starts\n");
-		if (m_header.functionStartsPresent)
-			ParseFunctionStarts(platform, m_header.textBase, m_header.functionStarts);
-	}
-
-	auto relocationHandler = m_arch->GetRelocationHandler("Mach-O");
-	if (relocationHandler)
-	{
-		try
-		{
-			// For executables the relocations are attached to each of the sections
-			// In libraries these are zeroed out and collected in the dysymtab
-			vector<BNRelocationInfo> infoList;
-			for (auto& section : m_header.sections)
-			{
-				if (section.nreloc == 0)
-					continue;
-
-				char sectionName[17];
-				memcpy(sectionName, section.sectname, sizeof(section.sectname));
-				sectionName[16] = 0;
-
-				m_logger->LogDebug("Relocations for section %s", sectionName);
-				auto sec = GetSectionByName(sectionName);
-				if (!sec)
-				{
-					m_logger->LogError("Can't find section for %s", sectionName);
-					continue;
-				}
-				for (size_t i = 0; i < section.nreloc; i++)
-				{
-					relocation_info info;
-					reader.Seek(section.reloff + (i * sizeof(relocation_info)));
-					reader.Read(&info, sizeof(info));
-					BNRelocationInfo result;
-					memset(&result, 0, sizeof(result));
-					if (ParseRelocationEntry(info, sec->GetStart(), result))
-						infoList.push_back(result);
-				}
-			}
-
-			if (relocationHandler->GetRelocationInfo(this, m_arch, infoList))
-			{
-				for (auto& reloc: infoList)
-				{
-					if (reloc.symbolIndex >= m_symbols.size())
-						continue;
-
-					// retrieve first symbol that is not a symbol relocation
-					auto symbols = GetSymbolsByName(m_symbols[reloc.symbolIndex]);
-					for (const auto& symbol : symbols)
-					{
-						if (symbol->GetAddress() == reloc.address)
-							continue;
-						DefineRelocation(m_arch, reloc, symbol, reloc.address);
-						break;
-					}
-				}
-			}
-			infoList.clear();
-
-			// Handle local relocations for dynamic libraries
-			for (size_t i = 0; i < m_header.dysymtab.nlocrel; i++)
-			{
-				relocation_info info;
-				reader.Seek(m_header.dysymtab.locreloff + (i * sizeof(relocation_info)));
-				reader.Read(&info, sizeof(info));
-				BNRelocationInfo result;
-				memset(&result, 0, sizeof(result));
-				if (ParseRelocationEntry(info, m_header.relocationBase, result))
-					infoList.push_back(result);
-			}
-
-			if (relocationHandler->GetRelocationInfo(this, m_arch, infoList))
-			{
-				for (auto& reloc: infoList)
-				{
-					// TODO will matter once rebasing lands
-					if (!reloc.external)
-						continue;
-
-					if (reloc.symbolIndex >= m_symbols.size())
-						continue;
-
-					// retrieve first symbol that is not a symbol relocation
-					auto symbols = GetSymbolsByName(m_symbols[reloc.symbolIndex]);
-					for (const auto& symbol : symbols)
-					{
-						if (symbol->GetAddress() == reloc.address)
-							continue;
-						DefineRelocation(m_arch, reloc, symbol, reloc.address);
-						break;
-					}
-				}
-			}
-			infoList.clear();
-
-			// Handle external relocations for dynamic libraries
-			for (size_t i = 0; i < m_header.dysymtab.nextrel; i++)
-			{
-				relocation_info info;
-				reader.Seek(m_header.dysymtab.extreloff + (i * sizeof(relocation_info)));
-				reader.Read(&info, sizeof(info));
-				BNRelocationInfo result;
-				memset(&result, 0, sizeof(result));
-				if (ParseRelocationEntry(info, m_header.relocationBase, result))
-					infoList.push_back(result);
-			}
-
-			if (relocationHandler->GetRelocationInfo(this, m_arch, infoList))
-			{
-				for (auto& reloc: infoList)
-				{
-					// TODO will matter once rebasing lands
-					if (!reloc.external)
-						continue;
-
-					if (reloc.symbolIndex >= m_symbols.size())
-						continue;
-
-					// retrieve first symbol that is not a symbol relocation
-					auto symbols = GetSymbolsByName(m_symbols[reloc.symbolIndex]);
-					for (const auto& symbol : symbols)
-					{
-						if (symbol->GetAddress() == reloc.address)
-							continue;
-						DefineRelocation(m_arch, reloc, symbol, reloc.address);
-						break;
-					}
-				}
-			}
-			infoList.clear();
-		}
-		catch (ReadException&)
-		{
-			m_logger->LogError("Failed to read relocation data");
-		}
-	}
 
 	// Add Mach-O file header type info
 	EnumerationBuilder cpuTypeBuilder;
@@ -2053,6 +1569,525 @@ bool MachoView::Init()
 	std::chrono::steady_clock::time_point endTime = std::chrono::steady_clock::now();
 	double t = std::chrono::duration_cast<std::chrono::milliseconds>(endTime - startTime).count() / 1000.0;
 	m_logger->LogInfo("Mach-O parsing took %.3f seconds\n", t);
+	return true;
+}
+
+
+bool MachoView::InitializeHeader(MachOHeader& header, bool isMainHeader)
+{
+	Ref<Settings> settings = GetLoadSettings(GetTypeName());
+
+	for (auto& i : header.segments)
+		i.vmaddr += m_imageBaseAdjustment;
+
+	for (auto& i : header.sections)
+		i.addr += m_imageBaseAdjustment;
+
+	for (auto& i : header.symbolStubSections)
+		i.addr += m_imageBaseAdjustment;
+
+	for (auto& i : header.symbolPointerSections)
+		i.addr += m_imageBaseAdjustment;
+
+	for (auto& entryPoint : header.entryPoints)
+		entryPoint.first += (entryPoint.second ? 0 : m_imageBaseAdjustment);
+
+	if (header.routinesPresent)
+		header.routines64.init_address += m_imageBaseAdjustment;
+
+	for (auto& segment : header.segments)
+	{
+		if ((segment.initprot == MACHO_VM_PROT_NONE) || (!segment.vmsize))
+			continue;
+
+		if ((segment.initprot & MACHO_VM_PROT_EXECUTE) == MACHO_VM_PROT_EXECUTE)
+		{
+			if ((segment.fileoff == (0 + m_universalImageOffset)) && (segment.filesize != 0))
+				header.textBase = segment.vmaddr;
+			for (auto& entryPoint : header.entryPoints)
+			{
+				uint64_t val = entryPoint.first + (entryPoint.second ? header.textBase : 0);
+				if (find(header.m_entryPoints.begin(), header.m_entryPoints.end(), val) == header.m_entryPoints.end())
+					header.m_entryPoints.push_back(val);
+			}
+		}
+	}
+
+	for (auto& segment : header.segments)
+	{
+		if ((segment.initprot == MACHO_VM_PROT_NONE) || (!segment.vmsize))
+			continue;
+
+		uint32_t flags = 0;
+		if (segment.initprot & MACHO_VM_PROT_READ)
+			flags |= SegmentReadable;
+		if (segment.initprot & MACHO_VM_PROT_WRITE)
+			flags |= SegmentWritable;
+		if (segment.initprot & MACHO_VM_PROT_EXECUTE)
+			flags |= SegmentExecutable;
+		if (((segment.initprot & MACHO_VM_PROT_WRITE) == 0) && ((segment.maxprot & MACHO_VM_PROT_WRITE) == 0))
+			flags |= SegmentDenyWrite;
+		if (((segment.initprot & MACHO_VM_PROT_EXECUTE) == 0) && ((segment.maxprot & MACHO_VM_PROT_EXECUTE) == 0))
+			flags |= SegmentDenyExecute;
+
+		// if we're positive we have an entry point for some reason, force the segment
+		// executable. this helps with kernel images.
+		for (auto& entryPoint : header.m_entryPoints)
+			if (segment.vmaddr <= entryPoint && (entryPoint < (segment.vmaddr + segment.filesize)))
+				flags |= SegmentExecutable;
+
+		AddAutoSegment(segment.vmaddr, segment.vmsize, segment.fileoff, segment.filesize, flags);
+	}
+
+	for (auto& section : header.sections)
+	{
+		char sectionName[17];
+		memcpy(sectionName, section.sectname, sizeof(section.sectname));
+		sectionName[16] = 0;
+		header.sectionNames.push_back(sectionName);
+	}
+
+	header.sectionNames = GetUniqueSectionNames(header.sectionNames);
+
+	for (size_t i = 0; i < header.sections.size(); i++)
+	{
+		if (!header.sections[i].size)
+			continue;
+
+		string type;
+		BNSectionSemantics semantics = DefaultSectionSemantics;
+		switch (header.sections[i].flags & 0xff)
+		{
+		case S_REGULAR:
+			if (header.sections[i].flags & S_ATTR_PURE_INSTRUCTIONS)
+			{
+				type = "PURE_CODE";
+				semantics = ReadOnlyCodeSectionSemantics;
+			}
+			else if (header.sections[i].flags & S_ATTR_SOME_INSTRUCTIONS)
+			{
+				type = "CODE";
+				semantics = ReadOnlyCodeSectionSemantics;
+			}
+			else
+			{
+				type = "REGULAR";
+			}
+			break;
+		case S_ZEROFILL:
+			type = "ZEROFILL";
+			semantics = ReadWriteDataSectionSemantics;
+			break;
+		case S_CSTRING_LITERALS:
+			type = "CSTRING_LITERALS";
+			semantics = ReadOnlyDataSectionSemantics;
+			break;
+		case S_4BYTE_LITERALS:
+			type = "4BYTE_LITERALS";
+			break;
+		case S_8BYTE_LITERALS:
+			type = "8BYTE_LITERALS";
+			break;
+		case S_LITERAL_POINTERS:
+			type = "LITERAL_POINTERS";
+			semantics = ReadOnlyDataSectionSemantics;
+			break;
+		case S_NON_LAZY_SYMBOL_POINTERS:
+			type = "NON_LAZY_SYMBOL_POINTERS";
+			semantics = ReadOnlyDataSectionSemantics;
+			break;
+		case S_LAZY_SYMBOL_POINTERS:
+			type = "LAZY_SYMBOL_POINTERS";
+			semantics = ReadOnlyDataSectionSemantics;
+			break;
+		case S_SYMBOL_STUBS:
+			type = "SYMBOL_STUBS";
+			semantics = ReadOnlyCodeSectionSemantics;
+			break;
+		case S_MOD_INIT_FUNC_POINTERS:
+			type = "MOD_INIT_FUNC_POINTERS";
+			semantics = ReadOnlyDataSectionSemantics;
+			break;
+		case S_MOD_TERM_FUNC_POINTERS:
+			type = "MOD_TERM_FUNC_POINTERS";
+			semantics = ReadOnlyDataSectionSemantics;
+			break;
+		case S_COALESCED:
+			type = "COALESCED";
+			break;
+		case S_GB_ZEROFILL:
+			type = "GB_ZEROFILL";
+			semantics = ReadWriteDataSectionSemantics;
+			break;
+		case S_INTERPOSING:
+			type = "INTERPOSING";
+			break;
+		case S_16BYTE_LITERALS:
+			type = "16BYTE_LITERALS";
+			break;
+		case S_DTRACE_DOF:
+			type = "DTRACE_DOF";
+			break;
+		case S_LAZY_DYLIB_SYMBOL_POINTERS:
+			type = "LAZY_DYLIB_SYMBOL_POINTERS";
+			semantics = ReadOnlyDataSectionSemantics;
+			break;
+		case S_THREAD_LOCAL_REGULAR:
+			type = "THREAD_LOCAL_REGULAR";
+			break;
+		case S_THREAD_LOCAL_ZEROFILL:
+			type = "THREAD_LOCAL_ZEROFILL";
+			break;
+		case S_THREAD_LOCAL_VARIABLES:
+			type = "THREAD_LOCAL_VARIABLES";
+			break;
+		case S_THREAD_LOCAL_VARIABLE_POINTERS:
+			type = "THREAD_LOCAL_VARIABLE_POINTERS";
+			break;
+		case S_THREAD_LOCAL_INIT_FUNCTION_POINTERS:
+			type = "THREAD_LOCAL_INIT_FUNCTION_POINTERS";
+			break;
+		default:
+			type = "UNKNOWN";
+			break;
+		}
+		if (i >= header.sectionNames.size())
+			break;
+		if (strncmp(header.sections[i].sectname, "__text", sizeof(header.sections[i].sectname)) == 0)
+			semantics = ReadOnlyCodeSectionSemantics;
+		if (strncmp(header.sections[i].sectname, "__const", sizeof(header.sections[i].sectname)) == 0)
+			semantics = ReadOnlyDataSectionSemantics;
+		if (strncmp(header.sections[i].sectname, "__data", sizeof(header.sections[i].sectname)) == 0)
+			semantics = ReadWriteDataSectionSemantics;
+		if (strncmp(header.sections[i].segname, "__DATA_CONST", sizeof(header.sections[i].segname)) == 0)
+			semantics = ReadOnlyDataSectionSemantics;
+
+		AddAutoSection(header.sectionNames[i], header.sections[i].addr, header.sections[i].size, semantics, type, header.sections[i].align);
+	}
+	if (isMainHeader)
+	{
+		// Validate architecture
+		if (!m_arch)
+		{
+			// Parse only mode returns true, even if no arch support
+			if (m_parseOnly)
+				return true;
+
+			bool is64Bit;
+			string archName = UniversalViewType::ArchitectureToString(m_archId, 0, is64Bit);
+			if (!archName.empty())
+				m_logger->LogError(
+					"Mach-O architecture '%s' is not explicitly supported. Try 'Open with Options' to manually select "
+				    "a compatible architecture.",
+					archName.c_str());
+			else
+				m_logger->LogError(
+					"Mach-O architecture 0x%x is not explicitly supported. Try 'Open with Options' to manually select "
+				    "a compatible architecture.",
+					m_archId);
+
+			return false;
+		}
+
+		// Apply architecture and platform
+		Ref<Platform> platform = m_plat ? m_plat : g_machoViewType->GetPlatform(0, m_arch);
+		if (!platform)
+			platform = m_arch->GetStandalonePlatform();
+
+		if (header.m_entryPoints.size() > 0)
+			platform = platform->GetAssociatedPlatformByAddress(header.m_entryPoints[0]);
+
+		if (settings && settings->Contains("loader.platform")) // handle overrides
+		{
+			Ref<Platform> platformOverride = Platform::GetByName(settings->Get<string>("loader.platform", this));
+			if (platformOverride)
+				platform = platformOverride;
+		}
+
+		SetDefaultPlatform(platform);
+		SetDefaultArchitecture(platform->GetArchitecture());
+
+		// Finished for parse only mode
+		if (m_parseOnly)
+			return true;
+	}
+
+	BinaryReader reader(GetParentView());
+	reader.SetEndianness(m_endian);
+	reader.SetVirtualBase(m_universalImageOffset);
+	BinaryReader virtualReader(this);
+	virtualReader.SetEndianness(m_endian);
+
+	Ref<Platform> platform = m_plat ? m_plat : g_machoViewType->GetPlatform(0, m_arch);
+
+
+	// parse thread starts section if available
+	bool rebaseThreadStarts = false;
+	auto theadStartSection = GetSectionByName("__thread_starts");
+	vector<uint32_t> threadStarts;
+	uint64_t stepMultiplier;
+	if (theadStartSection)
+	{
+		size_t count = theadStartSection->GetLength() / 4;
+		threadStarts.reserve(count);
+		virtualReader.Seek(theadStartSection->GetStart());
+		stepMultiplier = virtualReader.Read32() & 0x1 ? 8 : 4;
+		for (uint32_t i = 1; i < count; i++)
+			threadStarts.push_back(virtualReader.Read32());
+
+		rebaseThreadStarts = true;
+		if (settings && settings->Contains("loader.macho.rebaseThreadStarts"))
+			rebaseThreadStarts = settings->Get<bool>("loader.macho.rebaseThreadStarts", this);
+	}
+
+	if (rebaseThreadStarts)
+		RebaseThreadStarts(virtualReader, threadStarts, stepMultiplier);
+
+	// Add module Init functions if they exist
+	size_t modInitFuncCnt = 0;
+	for (const auto& moduleInitSection : header.moduleInitSections)
+	{
+		// ignore mod_init functions that are rebased as part of thread starts
+		if (find(threadStarts.begin(), threadStarts.end(), moduleInitSection.offset) != threadStarts.end())
+			continue;
+
+		// The mod_init section contains a list of function pointers called at initialization
+		// if we don't have a defined entrypoint then use the first one in the list as the entrypoint
+		size_t i = 0;
+		reader.Seek(moduleInitSection.offset);
+		for (; i < (moduleInitSection.size / m_addressSize); i++)
+		{
+			uint64_t target = (m_addressSize == 4) ? reader.Read32() : reader.Read64();
+			target += m_imageBaseAdjustment;
+			Ref<Platform> targetPlatform = platform->GetAssociatedPlatformByAddress(target);
+			DefineMachoSymbol(FunctionSymbol, "mod_init_func_" + to_string(modInitFuncCnt++), target, GlobalBinding, false);
+			AddEntryPointForAnalysis(targetPlatform, target);
+		}
+	}
+
+	if (isMainHeader)
+	{
+		vector<Ref<Metadata>> libraries;
+		vector<Ref<Metadata>> libraryFound;
+		for (auto& l : header.dylibs)
+		{
+			libraries.push_back(new Metadata(string(l)));
+			Ref<TypeLibrary> typeLib = GetTypeLibrary(l);
+			if (!typeLib)
+			{
+				vector<Ref<TypeLibrary>> typeLibs = platform->GetTypeLibrariesByName(l);
+				if (typeLibs.size())
+				{
+					typeLib = typeLibs[0];
+					AddTypeLibrary(typeLib);
+
+					m_logger->LogDebug("mach-o: adding type library for '%s': %s (%s)",
+						l.c_str(), typeLib->GetName().c_str(), typeLib->GetGuid().c_str());
+				}
+			}
+
+			if (typeLib)
+				libraryFound.push_back(new Metadata(typeLib->GetName()));
+			else
+				libraryFound.push_back(new Metadata(string("")));
+		}
+		StoreMetadata("Libraries", new Metadata(libraries), true);
+		StoreMetadata("LibraryFound", new Metadata(libraryFound), true);
+	}
+
+	bool first = true;
+	for (auto entry : header.m_entryPoints)
+	{
+		AddEntryPointForAnalysis(platform, entry);
+		if (first)
+		{
+			first = false;
+			DefineAutoSymbol(new Symbol(FunctionSymbol, "_start", entry));
+		}
+	}
+
+	vector<uint32_t> indirectSymbols;
+	try
+	{
+		// Handle indirect symbols
+		if (header.dysymtab.nindirectsyms)
+		{
+			indirectSymbols.resize(header.dysymtab.nindirectsyms);
+			reader.Seek(header.dysymtab.indirectsymoff);
+			reader.Read(&indirectSymbols[0], header.dysymtab.nindirectsyms * sizeof(uint32_t));
+		}
+	}
+	catch (ReadException&)
+	{
+		m_logger->LogError("Failed to read indirect symbol data");
+	}
+
+	BeginBulkModifySymbols();
+	m_symbolQueue = new SymbolQueue();
+
+	try
+	{
+		// Add functions for all function symbols
+		m_logger->LogDebug("Parsing symbol table\n");
+		ParseSymbolTable(reader, header, header.symtab, indirectSymbols);
+	}
+	catch (std::exception&)
+	{
+		m_logger->LogError("Failed to parse symbol table!");
+	}
+
+	m_symbolQueue->Process();
+	delete m_symbolQueue;
+	m_symbolQueue = nullptr;
+
+	EndBulkModifySymbols();
+
+	bool parseFunctionStarts = true;
+	if (settings && settings->Contains("loader.macho.processFunctionStarts"))
+		parseFunctionStarts = settings->Get<bool>("loader.macho.processFunctionStarts", this);
+
+	if (parseFunctionStarts)
+	{
+		m_logger->LogDebug("Parsing function starts\n");
+		if (header.functionStartsPresent)
+			ParseFunctionStarts(platform, header.textBase, header.functionStarts);
+	}
+
+	auto relocationHandler = m_arch->GetRelocationHandler("Mach-O");
+	if (relocationHandler)
+	{
+		// FIXME: this if statement block really needs to be a function
+		try
+		{
+			// For executables the relocations are attached to each of the sections
+			// In libraries these are zeroed out and collected in the dysymtab
+			vector<BNRelocationInfo> infoList;
+			for (auto& section : header.sections)
+			{
+				if (section.nreloc == 0)
+					continue;
+
+				char sectionName[17];
+				memcpy(sectionName, section.sectname, sizeof(section.sectname));
+				sectionName[16] = 0;
+
+				m_logger->LogDebug("Relocations for section %s", sectionName);
+				auto sec = GetSectionByName(sectionName);
+				if (!sec)
+				{
+					m_logger->LogError("Can't find section for %s", sectionName);
+					continue;
+				}
+				for (size_t i = 0; i < section.nreloc; i++)
+				{
+					relocation_info info;
+					reader.Seek(section.reloff + (i * sizeof(relocation_info)));
+					reader.Read(&info, sizeof(info));
+					BNRelocationInfo result;
+					memset(&result, 0, sizeof(result));
+					if (ParseRelocationEntry(info, sec->GetStart(), result))
+							infoList.push_back(result);
+				}
+			}
+
+			if (relocationHandler->GetRelocationInfo(this, m_arch, infoList))
+			{
+				for (auto& reloc: infoList)
+				{
+					if (reloc.symbolIndex >= m_symbols.size())
+							continue;
+
+					// retrieve first symbol that is not a symbol relocation
+					auto symbols = GetSymbolsByName(m_symbols[reloc.symbolIndex]);
+					for (const auto& symbol : symbols)
+					{
+							if (symbol->GetAddress() == reloc.address)
+								continue;
+							DefineRelocation(m_arch, reloc, symbol, reloc.address);
+							break;
+					}
+				}
+			}
+			infoList.clear();
+
+			// Handle local relocations for dynamic libraries
+			for (size_t i = 0; i < header.dysymtab.nlocrel; i++)
+			{
+				relocation_info info;
+				reader.Seek(header.dysymtab.locreloff + (i * sizeof(relocation_info)));
+				reader.Read(&info, sizeof(info));
+				BNRelocationInfo result;
+				memset(&result, 0, sizeof(result));
+				if (ParseRelocationEntry(info, header.relocationBase, result))
+					infoList.push_back(result);
+			}
+
+			if (relocationHandler->GetRelocationInfo(this, m_arch, infoList))
+			{
+				for (auto& reloc: infoList)
+				{
+					// TODO will matter once rebasing lands
+					if (!reloc.external)
+							continue;
+
+					if (reloc.symbolIndex >= m_symbols.size())
+							continue;
+
+					// retrieve first symbol that is not a symbol relocation
+					auto symbols = GetSymbolsByName(m_symbols[reloc.symbolIndex]);
+					for (const auto& symbol : symbols)
+					{
+							if (symbol->GetAddress() == reloc.address)
+								continue;
+							DefineRelocation(m_arch, reloc, symbol, reloc.address);
+							break;
+					}
+				}
+			}
+			infoList.clear();
+
+			// Handle external relocations for dynamic libraries
+			for (size_t i = 0; i < header.dysymtab.nextrel; i++)
+			{
+				relocation_info info;
+				reader.Seek(header.dysymtab.extreloff + (i * sizeof(relocation_info)));
+				reader.Read(&info, sizeof(info));
+				BNRelocationInfo result;
+				memset(&result, 0, sizeof(result));
+				if (ParseRelocationEntry(info, header.relocationBase, result))
+					infoList.push_back(result);
+			}
+
+			if (relocationHandler->GetRelocationInfo(this, m_arch, infoList))
+			{
+				for (auto& reloc: infoList)
+				{
+					// TODO will matter once rebasing lands
+					if (!reloc.external)
+							continue;
+
+					if (reloc.symbolIndex >= m_symbols.size())
+							continue;
+
+					// retrieve first symbol that is not a symbol relocation
+					auto symbols = GetSymbolsByName(m_symbols[reloc.symbolIndex]);
+					for (const auto& symbol : symbols)
+					{
+							if (symbol->GetAddress() == reloc.address)
+								continue;
+							DefineRelocation(m_arch, reloc, symbol, reloc.address);
+							break;
+					}
+				}
+			}
+			infoList.clear();
+		}
+		catch (ReadException&)
+		{
+			m_logger->LogError("Failed to read relocation data");
+		}
+	}
+
 	return true;
 }
 

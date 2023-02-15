@@ -1303,6 +1303,7 @@ namespace BinaryNinja
 		std::vector<section_64> m_allSections;
 
 		MachOHeader HeaderForAddress(BinaryView* data, uint64_t address, bool isMainHeader);
+		bool InitializeHeader(MachOHeader& header, bool isMainHeader);
 
 		void RebaseThreadStarts(BinaryReader& virtualReader, std::vector<uint32_t>& threadStarts, uint64_t stepMultiplier);
 		Ref<Symbol> DefineMachoSymbol(
