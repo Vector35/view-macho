@@ -1299,6 +1299,8 @@ namespace BinaryNinja
 		SymbolQueue* m_symbolQueue = nullptr;
 		Ref<Logger> m_logger;
 
+		MachOHeader HeaderForAddress(BinaryView* data, uint64_t address, bool isMainHeader);
+
 		void RebaseThreadStarts(BinaryReader& virtualReader, std::vector<uint32_t>& threadStarts, uint64_t stepMultiplier);
 		Ref<Symbol> DefineMachoSymbol(
 			BNSymbolType type, const std::string& name, uint64_t addr, BNSymbolBinding binding, bool deferred);
