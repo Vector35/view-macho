@@ -207,9 +207,6 @@ MachoView::MachoView(const string& typeName, BinaryView* data, bool parseOnly): 
 	CreateLogger("BinaryView");
 	m_logger = CreateLogger("BinaryView.MachoView");
 
-	bzero(&m_header, sizeof(MachOHeader));
-	m_header.stringList = new DataBuffer();
-
 	m_backedByDatabase = data->GetFile()->IsBackedByDatabase(typeName);
 
 	Ref<BinaryViewType> universalViewType = BinaryViewType::GetByName("Universal");
@@ -267,40 +264,56 @@ MachoView::MachoView(const string& typeName, BinaryView* data, bool parseOnly): 
 		}
 	}
 
-	// Read common header fields
-	string errorMsg;
-	m_header.loadCommandOffset = g_machoViewType->ParseHeaders(data, m_universalImageOffset, m_header.ident, &m_arch, &m_plat, errorMsg);
-	if (!m_header.loadCommandOffset)
+	m_header = HeaderForAddress(data, 0, true);
+}
+
+
+MachOHeader MachoView::HeaderForAddress(BinaryView* data, uint64_t address, bool isMainHeader)
+{
+	MachOHeader header;
+
+	bzero(&header, sizeof(MachOHeader));
+	header.stringList = new DataBuffer();
+
+	std::string errorMsg;
+	header.loadCommandOffset = g_machoViewType->ParseHeaders(data, m_universalImageOffset + address, header.ident, &m_arch, &m_plat, errorMsg);
+	if (!header.loadCommandOffset)
 		throw MachoFormatException(errorMsg);
 
-	if (m_header.ident.magic == MH_MAGIC || m_header.ident.magic == MH_MAGIC_64)
+	if (isMainHeader)
 	{
-		m_endian = LittleEndian;
-		m_logger->LogDebug("Recognized Little Endian Mach-O");
-	}
-	else // (m_header.ident.magic == MH_CIGAM || m_header.ident.magic == MH_CIGAM_64)
-	{
-		m_endian = BigEndian;
-		m_logger->LogDebug("Recognized Big Endian Mach-O");
+		if (header.ident.magic == MH_MAGIC || header.ident.magic == MH_MAGIC_64)
+		{
+			m_endian = LittleEndian;
+			m_logger->LogDebug("Recognized Little Endian Mach-O");
+		}
+		else // (header.ident.magic == MH_CIGAM || header.ident.magic == MH_CIGAM_64)
+		{
+			m_endian = BigEndian;
+			m_logger->LogDebug("Recognized Big Endian Mach-O");
+		}
 	}
 
 	BinaryReader reader(data);
 	reader.SetEndianness(m_endian);
 	reader.SetVirtualBase(m_universalImageOffset);
-	reader.Seek(m_header.loadCommandOffset);
+	reader.Seek(header.loadCommandOffset);
 
-	m_objectFile = m_header.ident.filetype == MH_OBJECT;
-	m_dylibFile = m_header.ident.filetype == MH_DYLIB;
-	m_relocatable = ((m_header.ident.flags & MH_PIE) > 0) || m_objectFile || m_dylibFile;
-	m_archId = m_header.ident.cputype;
-	m_addressSize = (m_header.ident.cputype & MachOABIMask) == MachOABI64 ? 8 : 4;
+	if (isMainHeader)
+	{
+		m_objectFile = header.ident.filetype == MH_OBJECT;
+		m_dylibFile = header.ident.filetype == MH_DYLIB;
+		m_relocatable = ((header.ident.flags & MH_PIE) > 0) || m_objectFile || m_dylibFile;
+		m_archId = header.ident.cputype;
+		m_addressSize = (header.ident.cputype & MachOABIMask) == MachOABI64 ? 8 : 4;
+	}
 
 	bool first = true;
 	// Parse segment commands
 	try
 	{
-		m_logger->LogDebug("ident.ncmds: %d\n", m_header.ident.ncmds);
-		for (size_t i = 0; i < m_header.ident.ncmds; i++)
+		m_logger->LogDebug("ident.ncmds: %d\n", header.ident.ncmds);
+		for (size_t i = 0; i < header.ident.ncmds; i++)
 		{
 			load_command load;
 			segment_command_64 segment64;
@@ -316,57 +329,57 @@ MachoView::MachoView(const string& typeName, BinaryView* data, bool parseOnly): 
 
 			switch (load.cmd)
 			{
-				case LC_MAIN:
+			case LC_MAIN:
+			{
+				uint64_t entryPoint = reader.Read64();
+				m_logger->LogDebug("LC_MAIN entryPoint: %#016" PRIx64, entryPoint);
+				header.entryPoints.push_back({entryPoint, true});
+				(void)reader.Read64(); // Stack start
+				break;
+			}
+			case LC_SEGMENT: //map the 32bit version to 64 bits
+				m_logger->LogDebug("LC_SEGMENT\n");
+				segment64.cmd = LC_SEGMENT_64;
+				reader.Read(&segment64.segname, 16);
+				segment64.vmaddr = reader.Read32();
+				segment64.vmsize = reader.Read32();
+				segment64.fileoff = reader.Read32() + m_universalImageOffset;
+				segment64.filesize = reader.Read32();
+				segment64.maxprot = reader.Read32();
+				segment64.initprot = reader.Read32();
+				segment64.nsects = reader.Read32();
+				segment64.flags = reader.Read32();
+				if (first)
 				{
-					uint64_t entryPoint = reader.Read64();
-					m_logger->LogDebug("LC_MAIN entryPoint: %#016" PRIx64, entryPoint);
-					m_header.entryPoints.push_back({entryPoint, true});
-					(void)reader.Read64(); // Stack start
-					break;
-				}
-				case LC_SEGMENT: //map the 32bit version to 64 bits
-					m_logger->LogDebug("LC_SEGMENT\n");
-					segment64.cmd = LC_SEGMENT_64;
-					reader.Read(&segment64.segname, 16);
-					segment64.vmaddr = reader.Read32();
-					segment64.vmsize = reader.Read32();
-					segment64.fileoff = reader.Read32() + m_universalImageOffset;
-					segment64.filesize = reader.Read32();
-					segment64.maxprot = reader.Read32();
-					segment64.initprot = reader.Read32();
-					segment64.nsects = reader.Read32();
-					segment64.flags = reader.Read32();
-					if (first)
-					{
-						if (!((m_header.ident.flags & MH_SPLIT_SEGS) || m_header.ident.cputype == MACHO_CPU_TYPE_X86_64)
-						  || (segment64.flags & MACHO_VM_PROT_WRITE))
+						if (!((header.ident.flags & MH_SPLIT_SEGS) || header.ident.cputype == MACHO_CPU_TYPE_X86_64)
+							|| (segment64.flags & MACHO_VM_PROT_WRITE))
 						{
-							m_header.relocationBase = segment64.vmaddr;
+							header.relocationBase = segment64.vmaddr;
 							first = false;
 						}
-					}
-					m_logger->LogDebug("\tName:     %s\n" \
-							"\tCmd:      %#08"  PRIx32 "\n" \
-							"\tvmaddr:   %#016" PRIx64 "\n" \
-							"\tvmsize:   %#016" PRIx64 "\n" \
-							"\tfileoff:  %#016" PRIx64 "\n" \
-							"\tfilesize: %#016" PRIx64 "\n" \
-							"\tmaxprot:  %#08"  PRIx32 "\n" \
-							"\tinitprot: %#08"  PRIx32 "\n" \
-							"\tnsects:   %#08"  PRIx32 "\n" \
-							"\tflags:    %#08"  PRIx32 "\n",
-							(char*)&segment64.segname,
-							segment64.cmd,
-							segment64.vmaddr,
-							segment64.vmsize,
-							segment64.fileoff,
-							segment64.filesize,
-							segment64.maxprot,
-							segment64.initprot,
-							segment64.nsects,
-							segment64.flags);
-					for (size_t j = 0; j < segment64.nsects; j++)
-					{
+				}
+				m_logger->LogDebug("\tName:     %s\n" \
+					"\tCmd:      %#08"  PRIx32 "\n" \
+					"\tvmaddr:   %#016" PRIx64 "\n" \
+					"\tvmsize:   %#016" PRIx64 "\n" \
+					"\tfileoff:  %#016" PRIx64 "\n" \
+					"\tfilesize: %#016" PRIx64 "\n" \
+					"\tmaxprot:  %#08"  PRIx32 "\n" \
+					"\tinitprot: %#08"  PRIx32 "\n" \
+					"\tnsects:   %#08"  PRIx32 "\n" \
+					"\tflags:    %#08"  PRIx32 "\n",
+					(char*)&segment64.segname,
+					segment64.cmd,
+					segment64.vmaddr,
+					segment64.vmsize,
+					segment64.fileoff,
+					segment64.filesize,
+					segment64.maxprot,
+					segment64.initprot,
+					segment64.nsects,
+					segment64.flags);
+				for (size_t j = 0; j < segment64.nsects; j++)
+				{
 						reader.Read(&sect.sectname, 16);
 						reader.Read(&sect.segname, 16);
 						sect.addr = reader.Read32();
@@ -380,89 +393,89 @@ MachoView::MachoView(const string& typeName, BinaryView* data, bool parseOnly): 
 						sect.reserved2 = reader.Read32();
 						// if the segment isn't mapped into virtual memory don't add the corresponding sections.
 						if (segment64.vmsize > 0)
-							m_header.sections.push_back(sect);
+							header.sections.push_back(sect);
 						else
 							m_logger->LogInfo("Omitting section %16s at %#" PRIx64 " corresponding to segment %16s which is not mapped into memory", (char*)&sect.sectname, sect.addr, (char*)&sect.segname);
 
 						m_logger->LogDebug("\t\tSegName:  %16s\n" \
-								"\t\tSectName: %16s\n" \
-								"\t\tAddr:     %#" PRIx64 "\n" \
-								"\t\tSize:     %#" PRIx64 "\n" \
-								"\t\tOffset:   %#" PRIx32 "\n" \
-								"\t\tAlign:    %#" PRIx32 "\n" \
-								"\t\tReloff:   %#" PRIx32 "\n" \
-								"\t\tNReloc:   %#" PRIx32 "\n" \
-								"\t\tFlags:    %#" PRIx32 "\n" \
-								"\t\tReserved1:%#" PRIx32 "\n" \
-								"\t\tReserved2:%#" PRIx32 "\n" \
-								"\t\t------------------------\n",
-								(char*)&sect.segname,
-								(char*)&sect.sectname,
-								sect.addr,
-								sect.size,
-								sect.offset,
-								sect.align,
-								sect.reloff,
-								sect.nreloc,
-								sect.flags,
-								sect.reserved1,
-								sect.reserved2);
+							"\t\tSectName: %16s\n" \
+							"\t\tAddr:     %#" PRIx64 "\n" \
+							"\t\tSize:     %#" PRIx64 "\n" \
+							"\t\tOffset:   %#" PRIx32 "\n" \
+							"\t\tAlign:    %#" PRIx32 "\n" \
+							"\t\tReloff:   %#" PRIx32 "\n" \
+							"\t\tNReloc:   %#" PRIx32 "\n" \
+							"\t\tFlags:    %#" PRIx32 "\n" \
+							"\t\tReserved1:%#" PRIx32 "\n" \
+							"\t\tReserved2:%#" PRIx32 "\n" \
+							"\t\t------------------------\n",
+							(char*)&sect.segname,
+							(char*)&sect.sectname,
+							sect.addr,
+							sect.size,
+							sect.offset,
+							sect.align,
+							sect.reloff,
+							sect.nreloc,
+							sect.flags,
+							sect.reserved1,
+							sect.reserved2);
 						if (!strncmp(sect.sectname, "__mod_init_func", 15))
-							m_header.moduleInitSections.push_back(sect);
+							header.moduleInitSections.push_back(sect);
 						if ((sect.flags & (S_ATTR_SELF_MODIFYING_CODE | S_SYMBOL_STUBS)) == (S_ATTR_SELF_MODIFYING_CODE | S_SYMBOL_STUBS))
-							m_header.symbolStubSections.push_back(sect);
+							header.symbolStubSections.push_back(sect);
 						if ((sect.flags & S_NON_LAZY_SYMBOL_POINTERS) == S_NON_LAZY_SYMBOL_POINTERS)
-							m_header.symbolPointerSections.push_back(sect);
+							header.symbolPointerSections.push_back(sect);
 						if ((sect.flags & S_LAZY_SYMBOL_POINTERS) == S_LAZY_SYMBOL_POINTERS)
-							m_header.symbolPointerSections.push_back(sect);
-					}
-					m_header.segments.push_back(segment64);
-					break;
-				case LC_SEGMENT_64:
-					m_logger->LogDebug("LC_SEGMENT_64\n");
-					segment64.cmd = LC_SEGMENT_64;
-					reader.Read(&segment64.segname, 16);
-					segment64.vmaddr = reader.Read64();
-					segment64.vmsize = reader.Read64();
-					segment64.fileoff = reader.Read64() + m_universalImageOffset;
-					segment64.filesize = reader.Read64();
-					segment64.maxprot = reader.Read32();
-					segment64.initprot = reader.Read32();
-					segment64.nsects = reader.Read32();
-					segment64.flags = reader.Read32();
-					if (first)
-					{
-						if (!((m_header.ident.flags & MH_SPLIT_SEGS) || m_header.ident.cputype == MACHO_CPU_TYPE_X86_64)
-						  || (segment64.flags & MACHO_VM_PROT_WRITE))
+							header.symbolPointerSections.push_back(sect);
+				}
+				header.segments.push_back(segment64);
+				break;
+			case LC_SEGMENT_64:
+				m_logger->LogDebug("LC_SEGMENT_64\n");
+				segment64.cmd = LC_SEGMENT_64;
+				reader.Read(&segment64.segname, 16);
+				segment64.vmaddr = reader.Read64();
+				segment64.vmsize = reader.Read64();
+				segment64.fileoff = reader.Read64() + m_universalImageOffset;
+				segment64.filesize = reader.Read64();
+				segment64.maxprot = reader.Read32();
+				segment64.initprot = reader.Read32();
+				segment64.nsects = reader.Read32();
+				segment64.flags = reader.Read32();
+				if (first)
+				{
+						if (!((header.ident.flags & MH_SPLIT_SEGS) || header.ident.cputype == MACHO_CPU_TYPE_X86_64)
+							|| (segment64.flags & MACHO_VM_PROT_WRITE))
 						{
-							m_header.relocationBase = segment64.vmaddr;
+							header.relocationBase = segment64.vmaddr;
 							first = false;
 						}
-					}
-					m_logger->LogDebug(
-							"\tName:     %s\n" \
-							"\tCmd:      %#08"  PRIx32 "\n" \
-							"\tvmaddr:   %#016" PRIx64 "\n" \
-							"\tvmsize:   %#016" PRIx64 "\n" \
-							"\tfileoff:  %#016" PRIx64 "\n" \
-							"\tfilesize: %#016" PRIx64 "\n" \
-							"\tmaxprot:  %#08"  PRIx32 "\n" \
-							"\tinitprot: %#08"  PRIx32 "\n" \
-							"\tnsects:   %#08"  PRIx32 "\n" \
-							"\tflags:    %#08"  PRIx32 "\n",
-							(char*)&segment64.segname,
-							segment64.cmd,
-							segment64.vmaddr,
-							segment64.vmsize,
-							segment64.fileoff,
-							segment64.filesize,
-							segment64.maxprot,
-							segment64.initprot,
-							segment64.nsects,
-							segment64.flags);
-					m_logger->LogDebug("\t\t------------------------\n");
-					for (size_t j = 0; j < segment64.nsects; j++)
-					{
+				}
+				m_logger->LogDebug(
+					"\tName:     %s\n" \
+					"\tCmd:      %#08"  PRIx32 "\n" \
+					"\tvmaddr:   %#016" PRIx64 "\n" \
+					"\tvmsize:   %#016" PRIx64 "\n" \
+					"\tfileoff:  %#016" PRIx64 "\n" \
+					"\tfilesize: %#016" PRIx64 "\n" \
+					"\tmaxprot:  %#08"  PRIx32 "\n" \
+					"\tinitprot: %#08"  PRIx32 "\n" \
+					"\tnsects:   %#08"  PRIx32 "\n" \
+					"\tflags:    %#08"  PRIx32 "\n",
+					(char*)&segment64.segname,
+					segment64.cmd,
+					segment64.vmaddr,
+					segment64.vmsize,
+					segment64.fileoff,
+					segment64.filesize,
+					segment64.maxprot,
+					segment64.initprot,
+					segment64.nsects,
+					segment64.flags);
+				m_logger->LogDebug("\t\t------------------------\n");
+				for (size_t j = 0; j < segment64.nsects; j++)
+				{
 						reader.Read(&sect.sectname, 16);
 						reader.Read(&sect.segname, 16);
 						sect.addr = reader.Read64();
@@ -477,189 +490,189 @@ MachoView::MachoView(const string& typeName, BinaryView* data, bool parseOnly): 
 						sect.reserved3 = reader.Read32();
 						// if the segment isn't mapped into virtual memory don't add the corresponding sections.
 						if (segment64.vmsize > 0)
-							m_header.sections.push_back(sect);
+							header.sections.push_back(sect);
 						else
 							m_logger->LogInfo("Omitting section %16s at %#" PRIx64 " corresponding to segment %16s which is not mapped into memory", (char*)&sect.sectname, sect.addr, (char*)&sect.segname);
 						m_logger->LogDebug(
-								"\t\tSegName:  %16s\n" \
-								"\t\tSectName: %16s\n" \
-								"\t\tAddr:     %#" PRIx64 "\n" \
-								"\t\tSize:     %#" PRIx64 "\n" \
-								"\t\tOffset:   %#" PRIx32 "\n" \
-								"\t\tAlign:    %#" PRIx32 "\n" \
-								"\t\tReloff:   %#" PRIx32 "\n" \
-								"\t\tNReloc:   %#" PRIx32 "\n" \
-								"\t\tFlags:    %#" PRIx32 "\n" \
-								"\t\tReserved1:%#" PRIx32 "\n" \
-								"\t\tReserved2:%#" PRIx32 "\n" \
-								"\t\tReserved3:%#" PRIx32 "\n" \
-								"\t\t------------------------\n",
-								(char*)&sect.segname,
-								(char*)&sect.sectname,
-								sect.addr,
-								sect.size,
-								sect.offset,
-								sect.align,
-								sect.reloff,
-								sect.nreloc,
-								sect.flags,
-								sect.reserved1,
-								sect.reserved2,
-								sect.reserved3);
+							"\t\tSegName:  %16s\n" \
+							"\t\tSectName: %16s\n" \
+							"\t\tAddr:     %#" PRIx64 "\n" \
+							"\t\tSize:     %#" PRIx64 "\n" \
+							"\t\tOffset:   %#" PRIx32 "\n" \
+							"\t\tAlign:    %#" PRIx32 "\n" \
+							"\t\tReloff:   %#" PRIx32 "\n" \
+							"\t\tNReloc:   %#" PRIx32 "\n" \
+							"\t\tFlags:    %#" PRIx32 "\n" \
+							"\t\tReserved1:%#" PRIx32 "\n" \
+							"\t\tReserved2:%#" PRIx32 "\n" \
+							"\t\tReserved3:%#" PRIx32 "\n" \
+							"\t\t------------------------\n",
+							(char*)&sect.segname,
+							(char*)&sect.sectname,
+							sect.addr,
+							sect.size,
+							sect.offset,
+							sect.align,
+							sect.reloff,
+							sect.nreloc,
+							sect.flags,
+							sect.reserved1,
+							sect.reserved2,
+							sect.reserved3);
 						if (!strncmp(sect.sectname, "__mod_init_func", 15))
-							m_header.moduleInitSections.push_back(sect);
+							header.moduleInitSections.push_back(sect);
 						if ((sect.flags & (S_ATTR_SELF_MODIFYING_CODE | S_SYMBOL_STUBS)) == (S_ATTR_SELF_MODIFYING_CODE | S_SYMBOL_STUBS))
-							m_header.symbolStubSections.push_back(sect);
+							header.symbolStubSections.push_back(sect);
 						if ((sect.flags & S_NON_LAZY_SYMBOL_POINTERS) == S_NON_LAZY_SYMBOL_POINTERS)
-							m_header.symbolPointerSections.push_back(sect);
+							header.symbolPointerSections.push_back(sect);
 						if ((sect.flags & S_LAZY_SYMBOL_POINTERS) == S_LAZY_SYMBOL_POINTERS)
-							m_header.symbolPointerSections.push_back(sect);
-					}
-					m_header.segments.push_back(segment64);
-					break;
-				case LC_ROUTINES: //map the 32bit version to 64bits
-					m_logger->LogDebug("LC_REOUTINES\n");
-					m_header.routines64.cmd = LC_ROUTINES_64;
-					m_header.routines64.init_address = reader.Read32();
-					m_header.routines64.init_module = reader.Read32();
-					m_header.routines64.reserved1 = reader.Read32();
-					m_header.routines64.reserved2 = reader.Read32();
-					m_header.routines64.reserved3 = reader.Read32();
-					m_header.routines64.reserved4 = reader.Read32();
-					m_header.routines64.reserved5 = reader.Read32();
-					m_header.routines64.reserved6 = reader.Read32();
-					m_header.routinesPresent = true;
-					m_logger->LogDebug("\tinit_address: %016" PRIx64 "\n\tinit_module: %08" PRIx64 "\n",
-							m_header.routines64.init_address, m_header.routines64.init_module);
-					break;
-				case LC_ROUTINES_64:
-					m_logger->LogDebug("LC_REOUTINES_64\n");
-					m_header.routines64.cmd = LC_ROUTINES_64;
-					m_header.routines64.init_address = reader.Read64();
-					m_header.routines64.init_module = reader.Read64();
-					m_header.routines64.reserved1 = reader.Read64();
-					m_header.routines64.reserved2 = reader.Read64();
-					m_header.routines64.reserved3 = reader.Read64();
-					m_header.routines64.reserved4 = reader.Read64();
-					m_header.routines64.reserved5 = reader.Read64();
-					m_header.routines64.reserved6 = reader.Read64();
-					m_header.routinesPresent = true;
-					m_logger->LogDebug("\tinit_address: %016" PRIx64 "\n\tinit_module: %08" PRIx64 "\n",
-							m_header.routines64.init_address, m_header.routines64.init_module);
-					break;
-				case LC_FUNCTION_STARTS:
-					m_logger->LogDebug("LC_FUNCTION_STARTS\n");
-					m_header.functionStarts.funcoff = reader.Read32();
-					m_header.functionStarts.funcsize = reader.Read32();
-					m_header.functionStartsPresent = true;
-					m_logger->LogDebug("\tFunction Starts:\n\toffset: %#08" PRIx32 "\n\tsize: %#08" PRIx32 "\n",
-							m_header.functionStarts.funcoff, m_header.functionStarts.funcsize);
-					break;
-				case LC_SYMTAB:
-					m_logger->LogDebug("LC_SYMTAB\n");
-					m_header.symtab.symoff  = reader.Read32();
-					m_header.symtab.nsyms   = reader.Read32();
-					m_header.symtab.stroff  = reader.Read32();
-					m_header.symtab.strsize = reader.Read32();
-					reader.Seek(m_header.symtab.stroff);
-					m_header.stringList->Append(reader.Read(m_header.symtab.strsize));
-					m_header.stringListSize = m_header.symtab.strsize;
-					m_logger->LogDebug("\tstrsize: %08x\n" \
-							"\tstroff: %08x\n" \
-							"\tnsyms: %08x\n",
-							m_header.symtab.strsize,
-							m_header.symtab.stroff,
-							m_header.symtab.nsyms);
-					break;
-				case LC_DYSYMTAB:
-					m_logger->LogDebug("LC_DYSYMTAB\n");
-					m_header.dysymtab.ilocalsym = reader.Read32();
-					m_header.dysymtab.nlocalsym = reader.Read32();
-					m_header.dysymtab.iextdefsym = reader.Read32();
-					m_header.dysymtab.nextdefsym = reader.Read32();
-					m_header.dysymtab.iundefsym = reader.Read32();
-					m_header.dysymtab.nundefsym = reader.Read32();
-					m_header.dysymtab.tocoff = reader.Read32();
-					m_header.dysymtab.ntoc = reader.Read32();
-					m_header.dysymtab.modtaboff = reader.Read32();
-					m_header.dysymtab.nmodtab = reader.Read32();
-					m_header.dysymtab.extrefsymoff = reader.Read32();
-					m_header.dysymtab.nextrefsyms = reader.Read32();
-					m_header.dysymtab.indirectsymoff = reader.Read32();
-					m_header.dysymtab.nindirectsyms = reader.Read32();
-					m_header.dysymtab.extreloff = reader.Read32();
-					m_header.dysymtab.nextrel = reader.Read32();
-					m_header.dysymtab.locreloff = reader.Read32();
-					m_header.dysymtab.nlocrel = reader.Read32();
-					m_logger->LogDebug("\tm_header.dysymtab.ilocalsym      0x%08x\n"\
-					         "\tm_header.dysymtab.nlocalsym      0x%08x\n"\
-					         "\tm_header.dysymtab.iextdefsym     0x%08x\n"\
-					         "\tm_header.dysymtab.nextdefsym     0x%08x\n"\
-					         "\tm_header.dysymtab.iundefsym      0x%08x\n"\
-					         "\tm_header.dysymtab.nundefsym      0x%08x\n"\
-					         "\tm_header.dysymtab.tocoff         0x%08x\n"\
-					         "\tm_header.dysymtab.ntoc           0x%08x\n"\
-					         "\tm_header.dysymtab.modtaboff      0x%08x\n"\
-					         "\tm_header.dysymtab.nmodtab        0x%08x\n"\
-					         "\tm_header.dysymtab.extrefsymoff   0x%08x\n"\
-					         "\tm_header.dysymtab.nextrefsyms    0x%08x\n"\
-					         "\tm_header.dysymtab.indirectsymoff 0x%08x\n"\
-					         "\tm_header.dysymtab.nindirectsyms  0x%08x\n"\
-					         "\tm_header.dysymtab.extreloff      0x%08x\n"\
-					         "\tm_header.dysymtab.nextrel        0x%08x\n"\
-					         "\tm_header.dysymtab.locreloff      0x%08x\n"\
-					         "\tm_header.dysymtab.nlocrel        0x%08x\n",
-					         m_header.dysymtab.ilocalsym,
-					         m_header.dysymtab.nlocalsym,
-					         m_header.dysymtab.iextdefsym,
-					         m_header.dysymtab.nextdefsym,
-					         m_header.dysymtab.iundefsym,
-					         m_header.dysymtab.nundefsym,
-					         m_header.dysymtab.tocoff,
-					         m_header.dysymtab.ntoc,
-					         m_header.dysymtab.modtaboff,
-					         m_header.dysymtab.nmodtab,
-					         m_header.dysymtab.extrefsymoff,
-					         m_header.dysymtab.nextrefsyms,
-					         m_header.dysymtab.indirectsymoff,
-					         m_header.dysymtab.nindirectsyms,
-					         m_header.dysymtab.extreloff,
-					         m_header.dysymtab.nextrel,
-					         m_header.dysymtab.locreloff,
-					         m_header.dysymtab.nlocrel);
-					m_header.dysymPresent = true;
-					break;
-				case LC_DYLD_CHAINED_FIXUPS:
-					m_logger->LogDebug("LC_DYLD_CHAINED_FIXUPS\n");
-					m_header.chainedFixups.dataoff = reader.Read32();
-					m_header.chainedFixups.datasize = reader.Read32();
-					break;
-				case LC_DYLD_INFO:
-				case LC_DYLD_INFO_ONLY:
-					m_logger->LogDebug("LC_DYLD_INFO\n");
-					m_header.dyldInfo.rebase_off = reader.Read32();
-					m_header.dyldInfo.rebase_size = reader.Read32();
-					m_header.dyldInfo.bind_off = reader.Read32();
-					m_header.dyldInfo.bind_size = reader.Read32();
-					m_header.dyldInfo.weak_bind_off = reader.Read32();
-					m_header.dyldInfo.weak_bind_size = reader.Read32();
-					m_header.dyldInfo.lazy_bind_off = reader.Read32();
-					m_header.dyldInfo.lazy_bind_size = reader.Read32();
-					m_header.dyldInfo.export_off = reader.Read32();
-					m_header.dyldInfo.export_size = reader.Read32();
-					m_header.exportTrie.dataoff = m_header.dyldInfo.export_off;
-					m_header.exportTrie.datasize = m_header.dyldInfo.export_size;
-					m_header.dyldInfoPresent = true;
-					break;
-				case LC_DYLD_EXPORTS_TRIE:
-					m_logger->LogDebug("LC_DYLD_EXPORTS_TRIE\n");
-					m_header.exportTrie.dataoff = reader.Read32();
-					m_header.exportTrie.datasize = reader.Read32();
-					break;
-				case LC_THREAD:
-				case LC_UNIXTHREAD:
-					while (reader.GetOffset() < nextOffset)
-					{
+							header.symbolPointerSections.push_back(sect);
+				}
+				header.segments.push_back(segment64);
+				break;
+			case LC_ROUTINES: //map the 32bit version to 64bits
+				m_logger->LogDebug("LC_REOUTINES\n");
+				header.routines64.cmd = LC_ROUTINES_64;
+				header.routines64.init_address = reader.Read32();
+				header.routines64.init_module = reader.Read32();
+				header.routines64.reserved1 = reader.Read32();
+				header.routines64.reserved2 = reader.Read32();
+				header.routines64.reserved3 = reader.Read32();
+				header.routines64.reserved4 = reader.Read32();
+				header.routines64.reserved5 = reader.Read32();
+				header.routines64.reserved6 = reader.Read32();
+				header.routinesPresent = true;
+				m_logger->LogDebug("\tinit_address: %016" PRIx64 "\n\tinit_module: %08" PRIx64 "\n",
+					header.routines64.init_address, header.routines64.init_module);
+				break;
+			case LC_ROUTINES_64:
+				m_logger->LogDebug("LC_REOUTINES_64\n");
+				header.routines64.cmd = LC_ROUTINES_64;
+				header.routines64.init_address = reader.Read64();
+				header.routines64.init_module = reader.Read64();
+				header.routines64.reserved1 = reader.Read64();
+				header.routines64.reserved2 = reader.Read64();
+				header.routines64.reserved3 = reader.Read64();
+				header.routines64.reserved4 = reader.Read64();
+				header.routines64.reserved5 = reader.Read64();
+				header.routines64.reserved6 = reader.Read64();
+				header.routinesPresent = true;
+				m_logger->LogDebug("\tinit_address: %016" PRIx64 "\n\tinit_module: %08" PRIx64 "\n",
+					header.routines64.init_address, header.routines64.init_module);
+				break;
+			case LC_FUNCTION_STARTS:
+				m_logger->LogDebug("LC_FUNCTION_STARTS\n");
+				header.functionStarts.funcoff = reader.Read32();
+				header.functionStarts.funcsize = reader.Read32();
+				header.functionStartsPresent = true;
+				m_logger->LogDebug("\tFunction Starts:\n\toffset: %#08" PRIx32 "\n\tsize: %#08" PRIx32 "\n",
+					header.functionStarts.funcoff, header.functionStarts.funcsize);
+				break;
+			case LC_SYMTAB:
+				m_logger->LogDebug("LC_SYMTAB\n");
+				header.symtab.symoff  = reader.Read32();
+				header.symtab.nsyms   = reader.Read32();
+				header.symtab.stroff  = reader.Read32();
+				header.symtab.strsize = reader.Read32();
+				reader.Seek(header.symtab.stroff);
+				header.stringList->Append(reader.Read(header.symtab.strsize));
+				header.stringListSize = header.symtab.strsize;
+				m_logger->LogDebug("\tstrsize: %08x\n" \
+					"\tstroff: %08x\n" \
+					"\tnsyms: %08x\n",
+					header.symtab.strsize,
+					header.symtab.stroff,
+					header.symtab.nsyms);
+				break;
+			case LC_DYSYMTAB:
+				m_logger->LogDebug("LC_DYSYMTAB\n");
+				header.dysymtab.ilocalsym = reader.Read32();
+				header.dysymtab.nlocalsym = reader.Read32();
+				header.dysymtab.iextdefsym = reader.Read32();
+				header.dysymtab.nextdefsym = reader.Read32();
+				header.dysymtab.iundefsym = reader.Read32();
+				header.dysymtab.nundefsym = reader.Read32();
+				header.dysymtab.tocoff = reader.Read32();
+				header.dysymtab.ntoc = reader.Read32();
+				header.dysymtab.modtaboff = reader.Read32();
+				header.dysymtab.nmodtab = reader.Read32();
+				header.dysymtab.extrefsymoff = reader.Read32();
+				header.dysymtab.nextrefsyms = reader.Read32();
+				header.dysymtab.indirectsymoff = reader.Read32();
+				header.dysymtab.nindirectsyms = reader.Read32();
+				header.dysymtab.extreloff = reader.Read32();
+				header.dysymtab.nextrel = reader.Read32();
+				header.dysymtab.locreloff = reader.Read32();
+				header.dysymtab.nlocrel = reader.Read32();
+				m_logger->LogDebug("\theader.dysymtab.ilocalsym      0x%08x\n"\
+					"\theader.dysymtab.nlocalsym      0x%08x\n"\
+					"\theader.dysymtab.iextdefsym     0x%08x\n"\
+					"\theader.dysymtab.nextdefsym     0x%08x\n"\
+					"\theader.dysymtab.iundefsym      0x%08x\n"\
+					"\theader.dysymtab.nundefsym      0x%08x\n"\
+					"\theader.dysymtab.tocoff         0x%08x\n"\
+					"\theader.dysymtab.ntoc           0x%08x\n"\
+					"\theader.dysymtab.modtaboff      0x%08x\n"\
+					"\theader.dysymtab.nmodtab        0x%08x\n"\
+					"\theader.dysymtab.extrefsymoff   0x%08x\n"\
+					"\theader.dysymtab.nextrefsyms    0x%08x\n"\
+					"\theader.dysymtab.indirectsymoff 0x%08x\n"\
+					"\theader.dysymtab.nindirectsyms  0x%08x\n"\
+					"\theader.dysymtab.extreloff      0x%08x\n"\
+					"\theader.dysymtab.nextrel        0x%08x\n"\
+					"\theader.dysymtab.locreloff      0x%08x\n"\
+					"\theader.dysymtab.nlocrel        0x%08x\n",
+					header.dysymtab.ilocalsym,
+					header.dysymtab.nlocalsym,
+					header.dysymtab.iextdefsym,
+					header.dysymtab.nextdefsym,
+					header.dysymtab.iundefsym,
+					header.dysymtab.nundefsym,
+					header.dysymtab.tocoff,
+					header.dysymtab.ntoc,
+					header.dysymtab.modtaboff,
+					header.dysymtab.nmodtab,
+					header.dysymtab.extrefsymoff,
+					header.dysymtab.nextrefsyms,
+					header.dysymtab.indirectsymoff,
+					header.dysymtab.nindirectsyms,
+					header.dysymtab.extreloff,
+					header.dysymtab.nextrel,
+					header.dysymtab.locreloff,
+					header.dysymtab.nlocrel);
+				header.dysymPresent = true;
+				break;
+			case LC_DYLD_CHAINED_FIXUPS:
+				m_logger->LogDebug("LC_DYLD_CHAINED_FIXUPS\n");
+				header.chainedFixups.dataoff = reader.Read32();
+				header.chainedFixups.datasize = reader.Read32();
+				break;
+			case LC_DYLD_INFO:
+			case LC_DYLD_INFO_ONLY:
+				m_logger->LogDebug("LC_DYLD_INFO\n");
+				header.dyldInfo.rebase_off = reader.Read32();
+				header.dyldInfo.rebase_size = reader.Read32();
+				header.dyldInfo.bind_off = reader.Read32();
+				header.dyldInfo.bind_size = reader.Read32();
+				header.dyldInfo.weak_bind_off = reader.Read32();
+				header.dyldInfo.weak_bind_size = reader.Read32();
+				header.dyldInfo.lazy_bind_off = reader.Read32();
+				header.dyldInfo.lazy_bind_size = reader.Read32();
+				header.dyldInfo.export_off = reader.Read32();
+				header.dyldInfo.export_size = reader.Read32();
+				header.exportTrie.dataoff = header.dyldInfo.export_off;
+				header.exportTrie.datasize = header.dyldInfo.export_size;
+				header.dyldInfoPresent = true;
+				break;
+			case LC_DYLD_EXPORTS_TRIE:
+				m_logger->LogDebug("LC_DYLD_EXPORTS_TRIE\n");
+				header.exportTrie.dataoff = reader.Read32();
+				header.exportTrie.datasize = reader.Read32();
+				break;
+			case LC_THREAD:
+			case LC_UNIXTHREAD:
+				while (reader.GetOffset() < nextOffset)
+				{
 						thread_command thread;
 						thread.flavor = reader.Read32();
 						thread.count = reader.Read32();
@@ -675,7 +688,7 @@ MachoView::MachoView(const string& typeName, BinaryView* data, bool parseOnly): 
 							}
 							//This wont be big endian so we can just read the whole thing
 							reader.Read(&thread.statex64, sizeof(thread.statex64));
-							m_header.entryPoints.push_back({thread.statex64.rip, false});
+							header.entryPoints.push_back({thread.statex64.rip, false});
 							break;
 						case MachOx86:
 							m_logger->LogDebug("x86 Thread state\n");
@@ -686,7 +699,7 @@ MachoView::MachoView(const string& typeName, BinaryView* data, bool parseOnly): 
 							}
 							//This wont be big endian so we can just read the whole thing
 							reader.Read(&thread.statex86, sizeof(thread.statex86));
-							m_header.entryPoints.push_back({thread.statex86.eip, false});
+							header.entryPoints.push_back({thread.statex86.eip, false});
 							break;
 						case MachOArm:
 							m_logger->LogDebug("Arm Thread state\n");
@@ -697,7 +710,7 @@ MachoView::MachoView(const string& typeName, BinaryView* data, bool parseOnly): 
 							}
 							//This wont be big endian so we can just read the whole thing
 							reader.Read(&thread.statearmv7, sizeof(thread.statearmv7));
-							m_header.entryPoints.push_back({thread.statearmv7.r15, false});
+							header.entryPoints.push_back({thread.statearmv7.r15, false});
 							break;
 						case MachOAarch64:
 						case MachOAarch6432:
@@ -708,7 +721,7 @@ MachoView::MachoView(const string& typeName, BinaryView* data, bool parseOnly): 
 								break;
 							}
 							reader.Read(&thread.stateaarch64, sizeof(thread.stateaarch64));
-							m_header.entryPoints.push_back({thread.stateaarch64.pc, false});
+							header.entryPoints.push_back({thread.stateaarch64.pc, false});
 							break;
 						case MachOPPC:
 							m_logger->LogDebug("PPC Thread state\n");
@@ -718,7 +731,7 @@ MachoView::MachoView(const string& typeName, BinaryView* data, bool parseOnly): 
 								break;
 							}
 							//Read individual entries for endian reasons
-							m_header.entryPoints.push_back({reader.Read32(), false});
+							header.entryPoints.push_back({reader.Read32(), false});
 							(void)reader.Read32();
 							(void)reader.Read32();
 							//Read the rest of the structure
@@ -731,7 +744,7 @@ MachoView::MachoView(const string& typeName, BinaryView* data, bool parseOnly): 
 								reader.SeekRelative(thread.count * sizeof(uint32_t));
 								break;
 							}
-							m_header.entryPoints.push_back({reader.Read64(), false});
+							header.entryPoints.push_back({reader.Read64(), false});
 							(void)reader.Read64();
 							(void)reader.Read64(); // Stack start
 							(void)reader.Read(&thread.stateppc64.r1, sizeof(thread.stateppc64) - (3 * 8));
@@ -739,70 +752,41 @@ MachoView::MachoView(const string& typeName, BinaryView* data, bool parseOnly): 
 						default:
 							m_logger->LogError("Unknown archid: %x", m_archId);
 						}
-					}
-					break;
-				case LC_LOAD_DYLIB:
-					{
-						uint32_t offset = reader.Read32();
-						if (offset < nextOffset)
-						{
-							reader.Seek(curOffset + offset);
-							string libname = reader.ReadCString();
-							m_header.dylibs.push_back(libname);
-						}
-					}
-					break;
-				case LC_BUILD_VERSION:
+				}
+				break;
+			case LC_LOAD_DYLIB:
+			{
+				uint32_t offset = reader.Read32();
+				if (offset < nextOffset)
 				{
-					m_logger->LogDebug("LC_BUILD_VERSION:");
-					m_header.buildVersion.platform = reader.Read32();
-					m_header.buildVersion.minos = reader.Read32();
-					m_header.buildVersion.sdk = reader.Read32();
-					m_header.buildVersion.ntools = reader.Read32();
-					m_logger->LogDebug("Platform: %s", BuildPlatformToString(m_header.buildVersion.platform).c_str());
-					m_logger->LogDebug("MinOS: %s", BuildToolVersionToString(m_header.buildVersion.minos).c_str());
-					m_logger->LogDebug("SDK: %s", BuildToolVersionToString(m_header.buildVersion.sdk).c_str());
-					for (uint32_t i = 0; (i < m_header.buildVersion.ntools) && (i < 10); i++)
-					{
+						reader.Seek(curOffset + offset);
+						string libname = reader.ReadCString();
+						header.dylibs.push_back(libname);
+				}
+			}
+			break;
+			case LC_BUILD_VERSION:
+			{
+				m_logger->LogDebug("LC_BUILD_VERSION:");
+				header.buildVersion.platform = reader.Read32();
+				header.buildVersion.minos = reader.Read32();
+				header.buildVersion.sdk = reader.Read32();
+				header.buildVersion.ntools = reader.Read32();
+				m_logger->LogDebug("Platform: %s", BuildPlatformToString(header.buildVersion.platform).c_str());
+				m_logger->LogDebug("MinOS: %s", BuildToolVersionToString(header.buildVersion.minos).c_str());
+				m_logger->LogDebug("SDK: %s", BuildToolVersionToString(header.buildVersion.sdk).c_str());
+				for (uint32_t i = 0; (i < header.buildVersion.ntools) && (i < 10); i++)
+				{
 						uint32_t tool = reader.Read32();
 						uint32_t version = reader.Read32();
-						m_header.buildToolVersions.push_back({tool, version});
+						header.buildToolVersions.push_back({tool, version});
 						m_logger->LogDebug("Build Tool: %s: %s", BuildToolToString(tool).c_str(), BuildToolVersionToString(version).c_str());
-					}
-					break;
 				}
-				// case LC_UUID:                 LogDebug("LC_UUID");                 bytesRead = sizeof(load); break;
-				// case LC_ID_DYLIB:             LogDebug("LC_ID_DYLIB");             bytesRead = sizeof(load); break;
-				// case LC_LOAD_WEAK_DYLIB:      LogDebug("LC_LOAD_WEAK_DYLIB");      bytesRead = sizeof(load); break;
-				// case LC_LOAD_DYLINKER:        LogDebug("LC_LOAD_DYLINKER");        bytesRead = sizeof(load); break;
-				// case LC_ID_DYLINKER:          LogDebug("LC_ID_DYLINKER");          bytesRead = sizeof(load); break;
-				// case LC_PREBOUND_DYLIB:       LogDebug("LC_PREBOUND_DYLIB");       bytesRead = sizeof(load); break;
-				// case LC_SUB_FRAMEWORK:        LogDebug("LC_SUB_FRAMEWORK");        bytesRead = sizeof(load); break;
-				// case LC_SUB_UMBRELLA:         LogDebug("LC_SUB_UMBRELLA");         bytesRead = sizeof(load); break;
-				// case LC_SUB_CLIENT:           LogDebug("LC_SUB_CLIENT");           bytesRead = sizeof(load); break;
-				// case LC_SUB_LIBRARY:          LogDebug("LC_SUB_LIBRARY");          bytesRead = sizeof(load); break;
-				// case LC_TWOLEVEL_HINTS:       LogDebug("LC_TWOLEVEL_HINTS");       bytesRead = sizeof(load); break;
-				// case LC_IDENT:                LogDebug("LC_IDENT");                bytesRead = sizeof(load); break;
-				// case LC_FVMFILE:              LogDebug("LC_FVMFILE");              bytesRead = sizeof(load); break;
-				// case LC_PREPAGE:              LogDebug("LC_PREPAGE");              bytesRead = sizeof(load); break;
-				// case LC_LOADFVMLIB:           LogDebug("LC_LOADFVMLIB");           bytesRead = sizeof(load); break;
-				// case LC_IDFVMLIB:             LogDebug("LC_IDFVMLIB");             bytesRead = sizeof(load); break;
-				// case LC_PREBIND_CKSUM:        LogDebug("LC_PREBIND_CKSUM");        bytesRead = sizeof(load); break;
-				// case LC_RPATH:                LogDebug("LC_RPATH");                bytesRead = sizeof(load); break;
-				// case LC_CODE_SIGNATURE:       LogDebug("LC_CODE_SIGNATURE");       bytesRead = sizeof(load); break;
-				// case LC_SEGMENT_SPLIT_INFO:   LogDebug("LC_SEGMENT_SPLIT_INFO");   bytesRead = sizeof(load); break;
-				// case LC_REEXPORT_DYLIB:       LogDebug("LC_REEXPORT_DYLIB");       bytesRead = sizeof(load); break;
-				// case LC_LAZY_LOAD_DYLIB:      LogDebug("LC_LAZY_LOAD_DYLIB");      bytesRead = sizeof(load); break;
-				// case LC_ENCRYPTION_INFO:      LogDebug("LC_ENCRYPTION_INFO");      bytesRead = sizeof(load); break;
-				// case LC_SOURCE_VERSION:       LogDebug("LC_SOURCE_VERSION");       bytesRead = sizeof(load); break;
-				// case LC_DYLD_ENVIRONMENT:     LogDebug("LC_DYLD_ENVIRONMENT");     bytesRead = sizeof(load); break;
-				// case LC_VERSION_MIN_IPHONEOS: LogDebug("LC_VERSION_MIN_IPHONEOS"); bytesRead = sizeof(load); break;
-				// case LC_VERSION_MIN_MACOSX:   LogDebug("LC_VERSION_MIN_MACOSX");   bytesRead = sizeof(load); break;
-				// case LC_DATA_IN_CODE:         LogDebug("LC_DATA_IN_CODE");         bytesRead = sizeof(load); break;
-				// case LC_DYLIB_CODE_SIGN_DRS:  LogDebug("LC_DYLIB_CODE_SIGN_DRS");  bytesRead = sizeof(load); break;
-				default:
-					m_logger->LogDebug("Unhandled command: %s : %" PRIu32 "\n", CommandToString(load.cmd).c_str(), load.cmdsize);
-					break;
+				break;
+			}
+			default:
+				m_logger->LogDebug("Unhandled command: %s : %" PRIu32 "\n", CommandToString(load.cmd).c_str(), load.cmdsize);
+				break;
 			}
 			if (reader.GetOffset() != nextOffset)
 			{
@@ -815,6 +799,8 @@ MachoView::MachoView(const string& typeName, BinaryView* data, bool parseOnly): 
 	{
 		throw MachoFormatException("Mach-O section headers invalid");
 	}
+
+	return header;
 }
 
 
@@ -922,7 +908,7 @@ bool MachoView::IsValidFunctionStart(uint64_t addr)
 
 void MachoView::ParseFunctionStarts(Platform* platform)
 {
-	if (m_header.functionStartsPresent == false)
+	if (!m_header.functionStartsPresent)
 		return;
 
 	BinaryReader reader(GetParentView());
@@ -2575,6 +2561,8 @@ void MachoView::ParseSymbolTable(BinaryReader& reader, const symtab_command& sym
 	{;}
 	return;
 }
+
+
 
 
 void MachoView::ParseChainedFixups()
