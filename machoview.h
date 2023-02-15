@@ -1299,25 +1299,28 @@ namespace BinaryNinja
 		SymbolQueue* m_symbolQueue = nullptr;
 		Ref<Logger> m_logger;
 
+		std::vector<segment_command_64> m_allSegments; //only three types of sections __TEXT, __DATA, __IMPORT
+		std::vector<section_64> m_allSections;
+
 		MachOHeader HeaderForAddress(BinaryView* data, uint64_t address, bool isMainHeader);
 
 		void RebaseThreadStarts(BinaryReader& virtualReader, std::vector<uint32_t>& threadStarts, uint64_t stepMultiplier);
 		Ref<Symbol> DefineMachoSymbol(
 			BNSymbolType type, const std::string& name, uint64_t addr, BNSymbolBinding binding, bool deferred);
-		void ParseSymbolTable(BinaryReader& reader, const symtab_command& symtab, const std::vector<uint32_t>& symbolStubsList);
+		void ParseSymbolTable(BinaryReader& reader, MachOHeader& header, const symtab_command& symtab, const std::vector<uint32_t>& symbolStubsList);
 		bool IsValidFunctionStart(uint64_t addr);
-		void ParseFunctionStarts(Platform* platform);
+		void ParseFunctionStarts(Platform* platform, uint64_t textBase, function_starts_command functionStarts);
 		bool ParseRelocationEntry(const relocation_info& info, uint64_t start, BNRelocationInfo& result);
 
-		void ParseExportTrie(BinaryReader& reader);
+		void ParseExportTrie(BinaryReader& reader, linkedit_data_command exportTrie);
 		void ReadExportNode(DataBuffer& buffer, std::vector<ExportNode>& results, const std::string& currentText,
 			size_t cursor, uint32_t endGuard);
 
-		void ParseDynamicTable(BinaryReader& reader, BNSymbolType type, uint32_t tableOffset, uint32_t tableSize,
+		void ParseDynamicTable(BinaryReader& reader, MachOHeader& header, BNSymbolType type, uint32_t tableOffset, uint32_t tableSize,
 			BNSymbolBinding binding);
-		bool GetSectionPermissions(uint64_t address, uint32_t &flags);
-		bool GetSegmentPermissions(uint64_t address, uint32_t &flags);
-		void ParseChainedFixups();
+		bool GetSectionPermissions(MachOHeader& header, uint64_t address, uint32_t &flags);
+		bool GetSegmentPermissions(MachOHeader& header, uint64_t address, uint32_t &flags);
+		void ParseChainedFixups(linkedit_data_command chainedFixups);
 
 		virtual uint64_t PerformGetEntryPoint() const override;
 
