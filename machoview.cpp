@@ -1054,11 +1054,6 @@ bool MachoView::Init()
 	else
 		m_imageBaseAdjustment = -(int64_t)(initialImageBase - preferredImageBase);
 
-	if (!InitializeHeader(m_header, true))
-		return false;
-
-	Ref<Platform> platform = m_plat ? m_plat : g_machoViewType->GetPlatform(0, m_arch);
-
 	// Add Mach-O file header type info
 	EnumerationBuilder cpuTypeBuilder;
 	cpuTypeBuilder.AddMemberWithValue("CPU_TYPE_ANY", MACHO_CPU_TYPE_ANY);
@@ -1083,7 +1078,7 @@ bool MachoView::Init()
 	Ref<Type> cpuTypeEnumType = Type::EnumerationType(nullptr, cpuTypeEnum, 4, false);
 	string cpuTypeEnumName = "cpu_type_t";
 	string cpuTypeEnumId = Type::GenerateAutoTypeId("macho", cpuTypeEnumName);
-	QualifiedName cpuTypeEnumQualName = DefineType(cpuTypeEnumId, cpuTypeEnumName, cpuTypeEnumType);
+	m_typeNames.cpuTypeEnumQualName = DefineType(cpuTypeEnumId, cpuTypeEnumName, cpuTypeEnumType);
 
 	EnumerationBuilder fileTypeBuilder;
 	fileTypeBuilder.AddMemberWithValue("MH_OBJECT", MH_OBJECT);
@@ -1102,7 +1097,7 @@ bool MachoView::Init()
 	Ref<Type> fileTypeEnumType = Type::EnumerationType(nullptr, fileTypeEnum, 4, false);
 	string fileTypeEnumName = "file_type_t";
 	string fileTypeEnumId = Type::GenerateAutoTypeId("macho", fileTypeEnumName);
-	QualifiedName fileTypeEnumQualName = DefineType(fileTypeEnumId, fileTypeEnumName, fileTypeEnumType);
+	m_typeNames.fileTypeEnumQualName = DefineType(fileTypeEnumId, fileTypeEnumName, fileTypeEnumType);
 
 	EnumerationBuilder flagsTypeBuilder;
 	flagsTypeBuilder.AddMemberWithValue("MH_NOUNDEFS", MH_NOUNDEFS);
@@ -1139,16 +1134,16 @@ bool MachoView::Init()
 	Ref<Type> flagsTypeEnumType = Type::EnumerationType(nullptr, flagsTypeEnum, 4, false);
 	string flagsTypeEnumName = "flags_type_t";
 	string flagsTypeEnumId = Type::GenerateAutoTypeId("macho", flagsTypeEnumName);
-	QualifiedName flagsTypeEnumQualName = DefineType(flagsTypeEnumId, flagsTypeEnumName, flagsTypeEnumType);
+	m_typeNames.flagsTypeEnumQualName = DefineType(flagsTypeEnumId, flagsTypeEnumName, flagsTypeEnumType);
 
 	StructureBuilder machoHeaderBuilder;
 	machoHeaderBuilder.AddMember(Type::IntegerType(4, false), "magic");
-	machoHeaderBuilder.AddMember(Type::NamedType(this, cpuTypeEnumQualName), "cputype");
+	machoHeaderBuilder.AddMember(Type::NamedType(this, m_typeNames.cpuTypeEnumQualName), "cputype");
 	machoHeaderBuilder.AddMember(Type::IntegerType(4, false), "cpusubtype");
-	machoHeaderBuilder.AddMember(Type::NamedType(this, fileTypeEnumQualName), "filetype");
+	machoHeaderBuilder.AddMember(Type::NamedType(this, m_typeNames.fileTypeEnumQualName), "filetype");
 	machoHeaderBuilder.AddMember(Type::IntegerType(4, false), "ncmds");
 	machoHeaderBuilder.AddMember(Type::IntegerType(4, false), "sizeofcmds");
-	machoHeaderBuilder.AddMember(Type::NamedType(this, flagsTypeEnumQualName), "flags");
+	machoHeaderBuilder.AddMember(Type::NamedType(this, m_typeNames.flagsTypeEnumQualName), "flags");
 	if (m_addressSize == 8)
 		machoHeaderBuilder.AddMember(Type::IntegerType(4, false), "reserved");
 	Ref<Structure> machoHeaderStruct = machoHeaderBuilder.Finalize();
@@ -1156,7 +1151,7 @@ bool MachoView::Init()
 
 	string headerTypeId = Type::GenerateAutoTypeId("macho", headerName);
 	Ref<Type> machoHeaderType = Type::StructureType(machoHeaderStruct);
-	QualifiedName headerQualName = DefineType(headerTypeId, headerName, machoHeaderType);
+	m_typeNames.headerQualName = DefineType(headerTypeId, headerName, machoHeaderType);
 
 	EnumerationBuilder cmdTypeBuilder;
 	cmdTypeBuilder.AddMemberWithValue("LC_REQ_DYLD", LC_REQ_DYLD);
@@ -1213,21 +1208,22 @@ bool MachoView::Init()
 	cmdTypeBuilder.AddMemberWithValue("LC_BUILD_VERSION", LC_BUILD_VERSION);
 	cmdTypeBuilder.AddMemberWithValue("LC_DYLD_EXPORTS_TRIE", LC_DYLD_EXPORTS_TRIE);
 	cmdTypeBuilder.AddMemberWithValue("LC_DYLD_CHAINED_FIXUPS", LC_DYLD_CHAINED_FIXUPS);
+	cmdTypeBuilder.AddMemberWithValue("LC_FILESET_ENTRY", LC_DYLD_CHAINED_FIXUPS);
 	Ref<Enumeration> cmdTypeEnum = cmdTypeBuilder.Finalize();
 
 	Ref<Type> cmdTypeEnumType = Type::EnumerationType(nullptr, cmdTypeEnum, 4, false);
 	string cmdTypeEnumName = "load_command_type_t";
 	string cmdTypeEnumId = Type::GenerateAutoTypeId("macho", cmdTypeEnumName);
-	QualifiedName cmdTypeEnumQualName = DefineType(cmdTypeEnumId, cmdTypeEnumName, cmdTypeEnumType);
+	m_typeNames.cmdTypeEnumQualName = DefineType(cmdTypeEnumId, cmdTypeEnumName, cmdTypeEnumType);
 
 	StructureBuilder loadCommandBuilder;
-	loadCommandBuilder.AddMember(Type::NamedType(this, cmdTypeEnumQualName), "cmd");
+	loadCommandBuilder.AddMember(Type::NamedType(this, m_typeNames.cmdTypeEnumQualName), "cmd");
 	loadCommandBuilder.AddMember(Type::IntegerType(4, false), "cmdsize");
 	Ref<Structure> loadCommandStruct = loadCommandBuilder.Finalize();
 	QualifiedName loadCommandName = string("load_command");
 	string loadCommandTypeId = Type::GenerateAutoTypeId("macho", loadCommandName);
 	Ref<Type> loadCommandType = Type::StructureType(loadCommandStruct);
-	QualifiedName loadCommandQualName = DefineType(loadCommandTypeId, loadCommandName, loadCommandType);
+	m_typeNames.loadCommandQualName = DefineType(loadCommandTypeId, loadCommandName, loadCommandType);
 
 	EnumerationBuilder protTypeBuilder;
 	protTypeBuilder.AddMemberWithValue("VM_PROT_NONE", MACHO_VM_PROT_NONE);
@@ -1244,7 +1240,7 @@ bool MachoView::Init()
 	Ref<Type> protTypeEnumType = Type::EnumerationType(nullptr, protTypeEnum, 4, false);
 	string protTypeEnumName = "vm_prot_t";
 	string protTypeEnumId = Type::GenerateAutoTypeId("macho", protTypeEnumName);
-	QualifiedName protTypeEnumQualName = DefineType(protTypeEnumId, protTypeEnumName, protTypeEnumType);
+	m_typeNames.protTypeEnumQualName = DefineType(protTypeEnumId, protTypeEnumName, protTypeEnumType);
 
 	EnumerationBuilder segFlagsTypeBuilder;
 	segFlagsTypeBuilder.AddMemberWithValue("SG_HIGHVM", SG_HIGHVM);
@@ -1256,43 +1252,43 @@ bool MachoView::Init()
 	Ref<Type> segFlagsTypeEnumType = Type::EnumerationType(nullptr, segFlagsTypeEnum, 4, false);
 	string segFlagsTypeEnumName = "sg_flags_t";
 	string segFlagsTypeEnumId = Type::GenerateAutoTypeId("macho", segFlagsTypeEnumName);
-	QualifiedName segFlagsTypeEnumQualName = DefineType(segFlagsTypeEnumId, segFlagsTypeEnumName, segFlagsTypeEnumType);
+	m_typeNames.segFlagsTypeEnumQualName = DefineType(segFlagsTypeEnumId, segFlagsTypeEnumName, segFlagsTypeEnumType);
 
 	StructureBuilder loadSegmentCommandBuilder;
-	loadSegmentCommandBuilder.AddMember(Type::NamedType(this, cmdTypeEnumQualName), "cmd");
+	loadSegmentCommandBuilder.AddMember(Type::NamedType(this, m_typeNames.cmdTypeEnumQualName), "cmd");
 	loadSegmentCommandBuilder.AddMember(Type::IntegerType(4, false), "cmdsize");
 	loadSegmentCommandBuilder.AddMember(Type::ArrayType(Type::IntegerType(1, true), 16), "segname");
 	loadSegmentCommandBuilder.AddMember(Type::IntegerType(4, false), "vmaddr");
 	loadSegmentCommandBuilder.AddMember(Type::IntegerType(4, false), "vmsize");
 	loadSegmentCommandBuilder.AddMember(Type::IntegerType(4, false), "fileoff");
 	loadSegmentCommandBuilder.AddMember(Type::IntegerType(4, false), "filesize");
-	loadSegmentCommandBuilder.AddMember(Type::NamedType(this, protTypeEnumQualName), "maxprot");
-	loadSegmentCommandBuilder.AddMember(Type::NamedType(this, protTypeEnumQualName), "initprot");
+	loadSegmentCommandBuilder.AddMember(Type::NamedType(this, m_typeNames.protTypeEnumQualName), "maxprot");
+	loadSegmentCommandBuilder.AddMember(Type::NamedType(this, m_typeNames.protTypeEnumQualName), "initprot");
 	loadSegmentCommandBuilder.AddMember(Type::IntegerType(4, false), "nsects");
-	loadSegmentCommandBuilder.AddMember(Type::NamedType(this, segFlagsTypeEnumQualName), "flags");
+	loadSegmentCommandBuilder.AddMember(Type::NamedType(this, m_typeNames.segFlagsTypeEnumQualName), "flags");
 	Ref<Structure> loadSegmentCommandStruct = loadSegmentCommandBuilder.Finalize();
 	QualifiedName loadSegmentCommandName = string("segment_command");
 	string loadSegmentCommandTypeId = Type::GenerateAutoTypeId("macho", loadSegmentCommandName);
 	Ref<Type> loadSegmentCommandType = Type::StructureType(loadSegmentCommandStruct);
-	QualifiedName loadSegmentCommandQualName = DefineType(loadSegmentCommandTypeId, loadSegmentCommandName, loadSegmentCommandType);
+	m_typeNames.loadSegmentCommandQualName = DefineType(loadSegmentCommandTypeId, loadSegmentCommandName, loadSegmentCommandType);
 
 	StructureBuilder loadSegmentCommand64Builder;
-	loadSegmentCommand64Builder.AddMember(Type::NamedType(this, cmdTypeEnumQualName), "cmd");
+	loadSegmentCommand64Builder.AddMember(Type::NamedType(this, m_typeNames.cmdTypeEnumQualName), "cmd");
 	loadSegmentCommand64Builder.AddMember(Type::IntegerType(4, false), "cmdsize");
 	loadSegmentCommand64Builder.AddMember(Type::ArrayType(Type::IntegerType(1, true), 16), "segname");
 	loadSegmentCommand64Builder.AddMember(Type::IntegerType(8, false), "vmaddr");
 	loadSegmentCommand64Builder.AddMember(Type::IntegerType(8, false), "vmsize");
 	loadSegmentCommand64Builder.AddMember(Type::IntegerType(8, false), "fileoff");
 	loadSegmentCommand64Builder.AddMember(Type::IntegerType(8, false), "filesize");
-	loadSegmentCommand64Builder.AddMember(Type::NamedType(this, protTypeEnumQualName), "maxprot");
-	loadSegmentCommand64Builder.AddMember(Type::NamedType(this, protTypeEnumQualName), "initprot");
+	loadSegmentCommand64Builder.AddMember(Type::NamedType(this, m_typeNames.protTypeEnumQualName), "maxprot");
+	loadSegmentCommand64Builder.AddMember(Type::NamedType(this, m_typeNames.protTypeEnumQualName), "initprot");
 	loadSegmentCommand64Builder.AddMember(Type::IntegerType(4, false), "nsects");
-	loadSegmentCommand64Builder.AddMember(Type::NamedType(this, segFlagsTypeEnumQualName), "flags");
+	loadSegmentCommand64Builder.AddMember(Type::NamedType(this, m_typeNames.segFlagsTypeEnumQualName), "flags");
 	Ref<Structure> loadSegmentCommand64Struct = loadSegmentCommand64Builder.Finalize();
 	QualifiedName loadSegment64CommandName = string("segment_command_64");
 	string loadSegment64CommandTypeId = Type::GenerateAutoTypeId("macho", loadSegment64CommandName);
 	Ref<Type> loadSegment64CommandType = Type::StructureType(loadSegmentCommand64Struct);
-	QualifiedName loadSegment64CommandQualName = DefineType(loadSegment64CommandTypeId, loadSegment64CommandName, loadSegment64CommandType);
+	m_typeNames.loadSegment64CommandQualName = DefineType(loadSegment64CommandTypeId, loadSegment64CommandName, loadSegment64CommandType);
 
 	StructureBuilder sectionBuilder;
 	sectionBuilder.AddMember(Type::ArrayType(Type::IntegerType(1, true), 16), "sectname");
@@ -1310,7 +1306,7 @@ bool MachoView::Init()
 	QualifiedName sectionName = string("section");
 	string sectionTypeId = Type::GenerateAutoTypeId("macho", sectionName);
 	Ref<Type> sectionType = Type::StructureType(sectionStruct);
-	QualifiedName sectionQualName = DefineType(sectionTypeId, sectionName, sectionType);
+	m_typeNames.sectionQualName = DefineType(sectionTypeId, sectionName, sectionType);
 
 	StructureBuilder section64Builder;
 	section64Builder.AddMember(Type::ArrayType(Type::IntegerType(1, true), 16), "sectname");
@@ -1329,10 +1325,10 @@ bool MachoView::Init()
 	QualifiedName section64Name = string("section_64");
 	string section64TypeId = Type::GenerateAutoTypeId("macho", section64Name);
 	Ref<Type> section64Type = Type::StructureType(section64Struct);
-	QualifiedName section64QualName = DefineType(section64TypeId, section64Name, section64Type);
+	m_typeNames.section64QualName = DefineType(section64TypeId, section64Name, section64Type);
 
 	StructureBuilder symtabBuilder;
-	symtabBuilder.AddMember(Type::NamedType(this, cmdTypeEnumQualName), "cmd");
+	symtabBuilder.AddMember(Type::NamedType(this, m_typeNames.cmdTypeEnumQualName), "cmd");
 	symtabBuilder.AddMember(Type::IntegerType(4, false), "cmdsize");
 	symtabBuilder.AddMember(Type::IntegerType(4, false), "symoff");
 	symtabBuilder.AddMember(Type::IntegerType(4, false), "nsyms");
@@ -1342,10 +1338,10 @@ bool MachoView::Init()
 	QualifiedName symtabName = string("symtab");
 	string symtabTypeId = Type::GenerateAutoTypeId("macho", symtabName);
 	Ref<Type> symtabType = Type::StructureType(symtabStruct);
-	QualifiedName symtabQualName = DefineType(symtabTypeId, symtabName, symtabType);
+	m_typeNames.symtabQualName = DefineType(symtabTypeId, symtabName, symtabType);
 
 	StructureBuilder dynsymtabBuilder;
-	dynsymtabBuilder.AddMember(Type::NamedType(this, cmdTypeEnumQualName), "cmd");
+	dynsymtabBuilder.AddMember(Type::NamedType(this, m_typeNames.cmdTypeEnumQualName), "cmd");
 	dynsymtabBuilder.AddMember(Type::IntegerType(4, false), "cmdsize");
 	dynsymtabBuilder.AddMember(Type::IntegerType(4, false), "ilocalsym");
 	dynsymtabBuilder.AddMember(Type::IntegerType(4, false), "nlocalsym");
@@ -1369,20 +1365,20 @@ bool MachoView::Init()
 	QualifiedName dynsymtabName = string("dynsymtab");
 	string dynsymtabTypeId = Type::GenerateAutoTypeId("macho", dynsymtabName);
 	Ref<Type> dynsymtabType = Type::StructureType(dynsymtabStruct);
-	QualifiedName dynsymtabQualName = DefineType(dynsymtabTypeId, dynsymtabName, dynsymtabType);
+	m_typeNames.dynsymtabQualName = DefineType(dynsymtabTypeId, dynsymtabName, dynsymtabType);
 
 	StructureBuilder uuidBuilder;
-	uuidBuilder.AddMember(Type::NamedType(this, cmdTypeEnumQualName), "cmd");
+	uuidBuilder.AddMember(Type::NamedType(this, m_typeNames.cmdTypeEnumQualName), "cmd");
 	uuidBuilder.AddMember(Type::IntegerType(4, false), "cmdsize");
 	uuidBuilder.AddMember(Type::ArrayType(Type::IntegerType(1, false), 16), "uuid");
 	Ref<Structure> uuidStruct = uuidBuilder.Finalize();
 	QualifiedName uuidName = string("uuid");
 	string uuidTypeId = Type::GenerateAutoTypeId("macho", uuidName);
 	Ref<Type> uuidType = Type::StructureType(uuidStruct);
-	QualifiedName uuidQualName = DefineType(uuidTypeId, uuidName, uuidType);
+	m_typeNames.uuidQualName = DefineType(uuidTypeId, uuidName, uuidType);
 
 	StructureBuilder linkeditDataBuilder;
-	linkeditDataBuilder.AddMember(Type::NamedType(this, cmdTypeEnumQualName), "cmd");
+	linkeditDataBuilder.AddMember(Type::NamedType(this, m_typeNames.cmdTypeEnumQualName), "cmd");
 	linkeditDataBuilder.AddMember(Type::IntegerType(4, false), "cmdsize");
 	linkeditDataBuilder.AddMember(Type::IntegerType(4, false), "dataoff");
 	linkeditDataBuilder.AddMember(Type::IntegerType(4, false), "datasize");
@@ -1390,10 +1386,10 @@ bool MachoView::Init()
 	QualifiedName linkeditDataName = string("linkedit_data");
 	string linkeditDataTypeId = Type::GenerateAutoTypeId("macho", linkeditDataName);
 	Ref<Type> linkeditDataType = Type::StructureType(linkeditDataStruct);
-	QualifiedName linkeditDataQualName = DefineType(linkeditDataTypeId, linkeditDataName, linkeditDataType);
+	m_typeNames.linkeditDataQualName = DefineType(linkeditDataTypeId, linkeditDataName, linkeditDataType);
 
 	StructureBuilder encryptionInfoBuilder;
-	encryptionInfoBuilder.AddMember(Type::NamedType(this, cmdTypeEnumQualName), "cmd");
+	encryptionInfoBuilder.AddMember(Type::NamedType(this, m_typeNames.cmdTypeEnumQualName), "cmd");
 	encryptionInfoBuilder.AddMember(Type::IntegerType(4, false), "cmdsize");
 	encryptionInfoBuilder.AddMember(Type::IntegerType(4, false), "cryptoff");
 	encryptionInfoBuilder.AddMember(Type::IntegerType(4, false), "cryptsize");
@@ -1402,10 +1398,10 @@ bool MachoView::Init()
 	QualifiedName encryptionInfoName = string("encryption_info");
 	string encryptionInfoTypeId = Type::GenerateAutoTypeId("macho", encryptionInfoName);
 	Ref<Type> encryptionInfoType = Type::StructureType(encryptionInfoStruct);
-	QualifiedName encryptionInfoQualName = DefineType(encryptionInfoTypeId, encryptionInfoName, encryptionInfoType);
+	m_typeNames.encryptionInfoQualName = DefineType(encryptionInfoTypeId, encryptionInfoName, encryptionInfoType);
 
 	StructureBuilder versionMinBuilder;
-	versionMinBuilder.AddMember(Type::NamedType(this, cmdTypeEnumQualName), "cmd");
+	versionMinBuilder.AddMember(Type::NamedType(this, m_typeNames.cmdTypeEnumQualName), "cmd");
 	versionMinBuilder.AddMember(Type::IntegerType(4, false), "cmdsize");
 	versionMinBuilder.AddMember(Type::IntegerType(4, false), "version");
 	versionMinBuilder.AddMember(Type::IntegerType(4, false), "sdk");
@@ -1413,10 +1409,10 @@ bool MachoView::Init()
 	QualifiedName versionMinName = string("version_min");
 	string versionMinTypeId = Type::GenerateAutoTypeId("macho", versionMinName);
 	Ref<Type> versionMinType = Type::StructureType(versionMinStruct);
-	QualifiedName versionMinQualName = DefineType(versionMinTypeId, versionMinName, versionMinType);
+	m_typeNames.versionMinQualName = DefineType(versionMinTypeId, versionMinName, versionMinType);
 
 	StructureBuilder dyldInfoBuilder;
-	dyldInfoBuilder.AddMember(Type::NamedType(this, cmdTypeEnumQualName), "cmd");
+	dyldInfoBuilder.AddMember(Type::NamedType(this, m_typeNames.cmdTypeEnumQualName), "cmd");
 	dyldInfoBuilder.AddMember(Type::IntegerType(4, false), "cmdsize");
 	dyldInfoBuilder.AddMember(Type::IntegerType(4, false), "rebase_off");
 	dyldInfoBuilder.AddMember(Type::IntegerType(4, false), "rebase_size");
@@ -1432,7 +1428,7 @@ bool MachoView::Init()
 	QualifiedName dyldInfoName = string("dyld_info");
 	string dyldInfoTypeId = Type::GenerateAutoTypeId("macho", dyldInfoName);
 	Ref<Type> dyldInfoType = Type::StructureType(dyldInfoStruct);
-	QualifiedName dyldInfoQualName = DefineType(dyldInfoTypeId, dyldInfoName, dyldInfoType);
+	m_typeNames.dyldInfoQualName = DefineType(dyldInfoTypeId, dyldInfoName, dyldInfoType);
 
 	StructureBuilder dylibBuilder;
 	dylibBuilder.AddMember(Type::IntegerType(4, false), "name");
@@ -1443,128 +1439,20 @@ bool MachoView::Init()
 	QualifiedName dylibName = string("dylib");
 	string dylibTypeId = Type::GenerateAutoTypeId("macho", dylibName);
 	Ref<Type> dylibType = Type::StructureType(dylibStruct);
-	QualifiedName dylibQualName = DefineType(dylibTypeId, dylibName, dylibType);
+	m_typeNames.dylibQualName = DefineType(dylibTypeId, dylibName, dylibType);
 
 	StructureBuilder dylibCommandBuilder;
-	dylibCommandBuilder.AddMember(Type::NamedType(this, cmdTypeEnumQualName), "cmd");
+	dylibCommandBuilder.AddMember(Type::NamedType(this, m_typeNames.cmdTypeEnumQualName), "cmd");
 	dylibCommandBuilder.AddMember(Type::IntegerType(4, false), "cmdsize");
-	dylibCommandBuilder.AddMember(Type::NamedType(this, dylibQualName), "dylib");
+	dylibCommandBuilder.AddMember(Type::NamedType(this, m_typeNames.dylibQualName), "dylib");
 	Ref<Structure> dylibCommandStruct = dylibCommandBuilder.Finalize();
 	QualifiedName dylibCommandName = string("dylib_command");
 	string dylibCommandTypeId = Type::GenerateAutoTypeId("macho", dylibCommandName);
 	Ref<Type> dylibCommandType = Type::StructureType(dylibCommandStruct);
-	QualifiedName dylibCommandQualName = DefineType(dylibCommandTypeId, dylibCommandName, dylibCommandType);
+	m_typeNames.dylibCommandQualName = DefineType(dylibCommandTypeId, dylibCommandName, dylibCommandType);
 
-	// Apply Mach-O header types
-	vector<std::tuple<uint64_t, string>> machoHeaderStarts;
-	machoHeaderStarts.emplace_back(m_header.textBase, "");
-	if (m_header.textBase != preferredImageBase)
-		machoHeaderStarts.emplace_back(preferredImageBase, preferredImageBaseDesc);
-
-	for (auto [imageBase, imageDesc] : machoHeaderStarts)
-	{
-		string errorMsg;
-		mach_header_64 mappedIdent;
-		uint64_t loadCommandOffset = g_machoViewType->ParseHeaders(this, imageBase, mappedIdent, nullptr, nullptr, errorMsg);
-		if (!loadCommandOffset)
-			continue;
-
-		DefineDataVariable(imageBase, Type::NamedType(this, headerQualName));
-		DefineAutoSymbol(new Symbol(DataSymbol, "__macho_header" + imageDesc, imageBase, LocalBinding));
-
-		try
-		{
-			virtualReader.Seek(imageBase + loadCommandOffset);
-			size_t sectionNum = 0;
-			for (size_t i = 0; i < mappedIdent.ncmds; i++)
-			{
-				load_command load;
-				uint64_t curOffset = virtualReader.GetOffset();
-				load.cmd = virtualReader.Read32();
-				load.cmdsize = virtualReader.Read32();
-				uint64_t nextOffset = curOffset + load.cmdsize;
-				switch (load.cmd)
-				{
-					case LC_SEGMENT:
-					{
-						DefineDataVariable(curOffset, Type::NamedType(this, loadSegmentCommandQualName));
-						virtualReader.SeekRelative(5 * 8);
-						size_t numSections = virtualReader.Read32();
-						virtualReader.SeekRelative(4);
-						for (size_t j = 0; j < numSections; j++)
-						{
-							DefineDataVariable(virtualReader.GetOffset(), Type::NamedType(this, sectionQualName));
-							DefineAutoSymbol(new Symbol(DataSymbol, "__macho_section" + imageDesc + "_[" + to_string(sectionNum++) + "]", virtualReader.GetOffset(), LocalBinding));
-							virtualReader.SeekRelative((8 * 8) + 4);
-						}
-						break;
-					}
-					case LC_SEGMENT_64:
-					{
-						DefineDataVariable(curOffset, Type::NamedType(this, loadSegment64CommandQualName));
-						virtualReader.SeekRelative(7 * 8);
-						size_t numSections = virtualReader.Read32();
-						virtualReader.SeekRelative(4);
-						for (size_t j = 0; j < numSections; j++)
-						{
-							DefineDataVariable(virtualReader.GetOffset(), Type::NamedType(this, section64QualName));
-							DefineAutoSymbol(new Symbol(DataSymbol, "__macho_section_64" + imageDesc + "_[" + to_string(sectionNum++) + "]", virtualReader.GetOffset(), LocalBinding));
-							virtualReader.SeekRelative(10 * 8);
-						}
-						break;
-					}
-					case LC_SYMTAB:
-						DefineDataVariable(curOffset, Type::NamedType(this, symtabQualName));
-						break;
-					case LC_DYSYMTAB:
-						DefineDataVariable(curOffset, Type::NamedType(this, dynsymtabQualName));
-						break;
-					case LC_UUID:
-						DefineDataVariable(curOffset, Type::NamedType(this, uuidQualName));
-						break;
-					case LC_ID_DYLIB:
-					case LC_LOAD_DYLIB:
-					case LC_REEXPORT_DYLIB:
-					case LC_LOAD_WEAK_DYLIB:
-					case LC_LOAD_UPWARD_DYLIB:
-						DefineDataVariable(curOffset, Type::NamedType(this, dylibCommandQualName));
-						if (load.cmdsize-24 <= 150)
-							DefineDataVariable(curOffset + 24, Type::ArrayType(Type::IntegerType(1, true), load.cmdsize-24));
-						break;
-					case LC_CODE_SIGNATURE:
-					case LC_SEGMENT_SPLIT_INFO:
-					case LC_FUNCTION_STARTS:
-					case LC_DATA_IN_CODE:
-					case LC_DYLIB_CODE_SIGN_DRS:
-					case LC_DYLD_EXPORTS_TRIE:
-					case LC_DYLD_CHAINED_FIXUPS:
-						DefineDataVariable(curOffset, Type::NamedType(this, linkeditDataQualName));
-						break;
-					case LC_ENCRYPTION_INFO:
-						DefineDataVariable(curOffset, Type::NamedType(this, encryptionInfoQualName));
-						break;
-					case LC_VERSION_MIN_MACOSX:
-					case LC_VERSION_MIN_IPHONEOS:
-						DefineDataVariable(curOffset, Type::NamedType(this, versionMinQualName));
-						break;
-					case LC_DYLD_INFO:
-					case LC_DYLD_INFO_ONLY:
-						DefineDataVariable(curOffset, Type::NamedType(this, dyldInfoQualName));
-						break;
-					default:
-						DefineDataVariable(curOffset, Type::NamedType(this, loadCommandQualName));
-						break;
-				}
-
-				DefineAutoSymbol(new Symbol(DataSymbol, "__macho_load_command" + imageDesc + "_[" + to_string(i) + "]", curOffset, LocalBinding));
-				virtualReader.Seek(nextOffset);
-			}
-		}
-		catch (ReadException&)
-		{
-			m_logger->LogError("Error when applying Mach-O header types at %" PRIx64, imageBase);
-		}
-	}
+	if (!InitializeHeader(m_header, true, preferredImageBase, preferredImageBaseDesc))
+		return false;
 
 	std::chrono::steady_clock::time_point endTime = std::chrono::steady_clock::now();
 	double t = std::chrono::duration_cast<std::chrono::milliseconds>(endTime - startTime).count() / 1000.0;
@@ -1573,7 +1461,7 @@ bool MachoView::Init()
 }
 
 
-bool MachoView::InitializeHeader(MachOHeader& header, bool isMainHeader)
+bool MachoView::InitializeHeader(MachOHeader& header, bool isMainHeader, uint64_t preferredImageBase, std::string preferredImageBaseDesc)
 {
 	Ref<Settings> settings = GetLoadSettings(GetTypeName());
 
@@ -2087,6 +1975,118 @@ bool MachoView::InitializeHeader(MachOHeader& header, bool isMainHeader)
 			m_logger->LogError("Failed to read relocation data");
 		}
 	}
+
+	vector<std::tuple<uint64_t, string>> machoHeaderStarts;
+	machoHeaderStarts.emplace_back(m_header.textBase, "");
+	if (m_header.textBase != preferredImageBase)
+		machoHeaderStarts.emplace_back(preferredImageBase, preferredImageBaseDesc);
+
+	// Apply Mach-O header types
+	for (auto [imageBase, imageDesc] : machoHeaderStarts)
+	{
+		string errorMsg;
+		mach_header_64 mappedIdent;
+		uint64_t loadCommandOffset = g_machoViewType->ParseHeaders(this, imageBase, mappedIdent, nullptr, nullptr, errorMsg);
+		if (!loadCommandOffset)
+			continue;
+
+		DefineDataVariable(imageBase, Type::NamedType(this, m_typeNames.headerQualName));
+		DefineAutoSymbol(new Symbol(DataSymbol, "__macho_header" + imageDesc, imageBase, LocalBinding));
+
+		try
+		{
+			virtualReader.Seek(imageBase + loadCommandOffset);
+			size_t sectionNum = 0;
+			for (size_t i = 0; i < mappedIdent.ncmds; i++)
+			{
+				load_command load;
+				uint64_t curOffset = virtualReader.GetOffset();
+				load.cmd = virtualReader.Read32();
+				load.cmdsize = virtualReader.Read32();
+				uint64_t nextOffset = curOffset + load.cmdsize;
+				switch (load.cmd)
+				{
+				case LC_SEGMENT:
+				{
+					DefineDataVariable(curOffset, Type::NamedType(this, m_typeNames.loadSegmentCommandQualName));
+					virtualReader.SeekRelative(5 * 8);
+					size_t numSections = virtualReader.Read32();
+					virtualReader.SeekRelative(4);
+					for (size_t j = 0; j < numSections; j++)
+					{
+							DefineDataVariable(virtualReader.GetOffset(), Type::NamedType(this, m_typeNames.sectionQualName));
+							DefineAutoSymbol(new Symbol(DataSymbol, "__macho_section" + imageDesc + "_[" + to_string(sectionNum++) + "]", virtualReader.GetOffset(), LocalBinding));
+							virtualReader.SeekRelative((8 * 8) + 4);
+					}
+					break;
+				}
+				case LC_SEGMENT_64:
+				{
+					DefineDataVariable(curOffset, Type::NamedType(this, m_typeNames.loadSegment64CommandQualName));
+					virtualReader.SeekRelative(7 * 8);
+					size_t numSections = virtualReader.Read32();
+					virtualReader.SeekRelative(4);
+					for (size_t j = 0; j < numSections; j++)
+					{
+							DefineDataVariable(virtualReader.GetOffset(), Type::NamedType(this, m_typeNames.section64QualName));
+							DefineAutoSymbol(new Symbol(DataSymbol, "__macho_section_64" + imageDesc + "_[" + to_string(sectionNum++) + "]", virtualReader.GetOffset(), LocalBinding));
+							virtualReader.SeekRelative(10 * 8);
+					}
+					break;
+				}
+				case LC_SYMTAB:
+					DefineDataVariable(curOffset, Type::NamedType(this, m_typeNames.symtabQualName));
+					break;
+				case LC_DYSYMTAB:
+					DefineDataVariable(curOffset, Type::NamedType(this, m_typeNames.dynsymtabQualName));
+					break;
+				case LC_UUID:
+					DefineDataVariable(curOffset, Type::NamedType(this, m_typeNames.uuidQualName));
+					break;
+				case LC_ID_DYLIB:
+				case LC_LOAD_DYLIB:
+				case LC_REEXPORT_DYLIB:
+				case LC_LOAD_WEAK_DYLIB:
+				case LC_LOAD_UPWARD_DYLIB:
+					DefineDataVariable(curOffset, Type::NamedType(this, m_typeNames.dylibCommandQualName));
+					if (load.cmdsize-24 <= 150)
+							DefineDataVariable(curOffset + 24, Type::ArrayType(Type::IntegerType(1, true), load.cmdsize-24));
+					break;
+				case LC_CODE_SIGNATURE:
+				case LC_SEGMENT_SPLIT_INFO:
+				case LC_FUNCTION_STARTS:
+				case LC_DATA_IN_CODE:
+				case LC_DYLIB_CODE_SIGN_DRS:
+				case LC_DYLD_EXPORTS_TRIE:
+				case LC_DYLD_CHAINED_FIXUPS:
+					DefineDataVariable(curOffset, Type::NamedType(this, m_typeNames.linkeditDataQualName));
+					break;
+				case LC_ENCRYPTION_INFO:
+					DefineDataVariable(curOffset, Type::NamedType(this, m_typeNames.encryptionInfoQualName));
+					break;
+				case LC_VERSION_MIN_MACOSX:
+				case LC_VERSION_MIN_IPHONEOS:
+					DefineDataVariable(curOffset, Type::NamedType(this, m_typeNames.versionMinQualName));
+					break;
+				case LC_DYLD_INFO:
+				case LC_DYLD_INFO_ONLY:
+					DefineDataVariable(curOffset, Type::NamedType(this, m_typeNames.dyldInfoQualName));
+					break;
+				default:
+					DefineDataVariable(curOffset, Type::NamedType(this, m_typeNames.loadCommandQualName));
+					break;
+				}
+
+				DefineAutoSymbol(new Symbol(DataSymbol, "__macho_load_command" + imageDesc + "_[" + to_string(i) + "]", curOffset, LocalBinding));
+				virtualReader.Seek(nextOffset);
+			}
+		}
+		catch (ReadException&)
+		{
+			LogError("Error when applying Mach-O header types at %" PRIx64, imageBase);
+		}
+	}
+
 
 	return true;
 }
