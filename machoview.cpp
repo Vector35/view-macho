@@ -393,7 +393,10 @@ MachOHeader MachoView::HeaderForAddress(BinaryView* data, uint64_t address, bool
 						sect.reserved2 = reader.Read32();
 						// if the segment isn't mapped into virtual memory don't add the corresponding sections.
 						if (segment64.vmsize > 0)
+						{
 							header.sections.push_back(sect);
+							m_allSections.push_back(sect);
+						}
 						else
 							m_logger->LogInfo("Omitting section %16s at %#" PRIx64 " corresponding to segment %16s which is not mapped into memory", (char*)&sect.sectname, sect.addr, (char*)&sect.segname);
 
@@ -430,6 +433,7 @@ MachOHeader MachoView::HeaderForAddress(BinaryView* data, uint64_t address, bool
 							header.symbolPointerSections.push_back(sect);
 				}
 				header.segments.push_back(segment64);
+				m_allSegments.push_back(segment64);
 				break;
 			case LC_SEGMENT_64:
 				m_logger->LogDebug("LC_SEGMENT_64\n");
@@ -490,7 +494,10 @@ MachOHeader MachoView::HeaderForAddress(BinaryView* data, uint64_t address, bool
 						sect.reserved3 = reader.Read32();
 						// if the segment isn't mapped into virtual memory don't add the corresponding sections.
 						if (segment64.vmsize > 0)
+						{
 							header.sections.push_back(sect);
+							m_allSections.push_back(sect);
+						}
 						else
 							m_logger->LogInfo("Omitting section %16s at %#" PRIx64 " corresponding to segment %16s which is not mapped into memory", (char*)&sect.sectname, sect.addr, (char*)&sect.segname);
 						m_logger->LogDebug(
@@ -529,6 +536,7 @@ MachOHeader MachoView::HeaderForAddress(BinaryView* data, uint64_t address, bool
 							header.symbolPointerSections.push_back(sect);
 				}
 				header.segments.push_back(segment64);
+				m_allSegments.push_back(segment64);
 				break;
 			case LC_ROUTINES: //map the 32bit version to 64bits
 				m_logger->LogDebug("LC_REOUTINES\n");
@@ -906,25 +914,22 @@ bool MachoView::IsValidFunctionStart(uint64_t addr)
 }
 
 
-void MachoView::ParseFunctionStarts(Platform* platform)
+void MachoView::ParseFunctionStarts(Platform* platform, uint64_t textBase, function_starts_command functionStarts)
 {
-	if (!m_header.functionStartsPresent)
-		return;
-
 	BinaryReader reader(GetParentView());
 	reader.SetEndianness(m_endian);
 	reader.SetVirtualBase(m_universalImageOffset);
 	try
 	{
-		reader.Seek(m_header.functionStarts.funcoff);
-		DataBuffer buffer = reader.Read(m_header.functionStarts.funcsize);
+		reader.Seek(functionStarts.funcoff);
+		DataBuffer buffer = reader.Read(functionStarts.funcsize);
 		size_t i = 0;
-		uint64_t curfunc = m_header.textBase;
+		uint64_t curfunc = textBase;
 		uint64_t curOffset = 0;
 
-		while (i < m_header.functionStarts.funcsize)
+		while (i < functionStarts.funcsize)
 		{
-			curOffset = readLEB128(buffer, m_header.functionStarts.funcsize, i);
+			curOffset = readLEB128(buffer, functionStarts.funcsize, i);
 			if (curOffset == 0)
 				continue;
 			curfunc += curOffset;
@@ -1380,7 +1385,7 @@ bool MachoView::Init()
 	{
 		// Add functions for all function symbols
 		m_logger->LogDebug("Parsing symbol table\n");
-		ParseSymbolTable(reader, m_header.symtab, indirectSymbols);
+		ParseSymbolTable(reader, m_header, m_header.symtab, indirectSymbols);
 	}
 	catch (std::exception&)
 	{
@@ -1400,7 +1405,8 @@ bool MachoView::Init()
 	if (parseFunctionStarts)
 	{
 		m_logger->LogDebug("Parsing function starts\n");
-		ParseFunctionStarts(platform);
+		if (m_header.functionStartsPresent)
+			ParseFunctionStarts(platform, m_header.textBase, m_header.functionStarts);
 	}
 
 	auto relocationHandler = m_arch->GetRelocationHandler("Mach-O");
@@ -2154,9 +2160,9 @@ Ref<Symbol> MachoView::DefineMachoSymbol(
 	return DefineAutoSymbolAndVariableOrFunction(GetDefaultPlatform(), result.first, result.second);
 }
 
-bool MachoView::GetSegmentPermissions(uint64_t address, uint32_t &flags)
+bool MachoView::GetSegmentPermissions(MachOHeader& header, uint64_t address, uint32_t &flags)
 {
-	for (auto& segment : m_header.segments)
+	for (auto& segment : header.segments)
 	{
 		if ((segment.initprot == MACHO_VM_PROT_NONE) || (!segment.vmsize))
 			continue;
@@ -2171,9 +2177,9 @@ bool MachoView::GetSegmentPermissions(uint64_t address, uint32_t &flags)
 	return false;
 }
 
-bool MachoView::GetSectionPermissions(uint64_t address, uint32_t &flags)
+bool MachoView::GetSectionPermissions(MachOHeader& header, uint64_t address, uint32_t &flags)
 {
-	for (auto& section : m_header.sections)
+	for (auto& section : header.sections)
 	{
 		if (!section.size)
 			continue;
@@ -2188,11 +2194,11 @@ bool MachoView::GetSectionPermissions(uint64_t address, uint32_t &flags)
 	return false;
 }
 
-void MachoView::ParseExportTrie(BinaryReader& reader)
+void MachoView::ParseExportTrie(BinaryReader& reader, linkedit_data_command exportTrie)
 {
 	try {
-		uint32_t endGuard = m_header.exportTrie.datasize;
-		DataBuffer buffer = GetParentView()->ReadBuffer(m_universalImageOffset + m_header.exportTrie.dataoff, m_header.exportTrie.datasize);
+		uint32_t endGuard = exportTrie.datasize;
+		DataBuffer buffer = GetParentView()->ReadBuffer(m_universalImageOffset + exportTrie.dataoff, exportTrie.datasize);
 
 		std::vector<ExportNode> nodes;
 		ReadExportNode(buffer, nodes, "", 0, endGuard);
@@ -2247,7 +2253,7 @@ void MachoView::ReadExportNode(DataBuffer& buffer, std::vector<ExportNode>& resu
 	}
 }
 
-void MachoView::ParseDynamicTable(BinaryReader& reader, BNSymbolType incomingType, uint32_t tableOffset,
+void MachoView::ParseDynamicTable(BinaryReader& reader, MachOHeader& header, BNSymbolType incomingType, uint32_t tableOffset,
 	uint32_t tableSize, BNSymbolBinding binding)
 {
 	try {
@@ -2301,9 +2307,9 @@ void MachoView::ParseDynamicTable(BinaryReader& reader, BNSymbolType incomingTyp
 				case BindOpcodeSetSegmentAndOffsetULEB:
 					segmentIndex = imm;
 					offset = readLEB128(table, tableSize, i);
-					if (segmentIndex >= m_header.segments.size())
+					if (segmentIndex >= header.segments.size())
 						throw MachoFormatException();
-					address = m_header.segments[segmentIndex].vmaddr + offset;
+					address = header.segments[segmentIndex].vmaddr + offset;
 					break;
 				case BindOpcodeAddAddressULEB:
 					address += readLEB128(table, tableSize, i);
@@ -2357,29 +2363,29 @@ void MachoView::ParseDynamicTable(BinaryReader& reader, BNSymbolType incomingTyp
 }
 
 
-void MachoView::ParseSymbolTable(BinaryReader& reader, const symtab_command& symtab, const vector<uint32_t>& indirectSymbols)
+void MachoView::ParseSymbolTable(BinaryReader& reader, MachOHeader& header, const symtab_command& symtab, const vector<uint32_t>& indirectSymbols)
 {
 	try
 	{
 		//First parse the imports
 		m_logger->LogDebug("Bind symbols");
-		ParseDynamicTable(reader, ImportAddressSymbol, m_header.dyldInfo.bind_off, m_header.dyldInfo.bind_size, GlobalBinding);
+		ParseDynamicTable(reader, header, ImportAddressSymbol, header.dyldInfo.bind_off, header.dyldInfo.bind_size, GlobalBinding);
 		m_logger->LogDebug("Weak symbols");
-		ParseDynamicTable(reader, ImportAddressSymbol, m_header.dyldInfo.weak_bind_off, m_header.dyldInfo.weak_bind_size, WeakBinding);
+		ParseDynamicTable(reader, header, ImportAddressSymbol, header.dyldInfo.weak_bind_off, header.dyldInfo.weak_bind_size, WeakBinding);
 		m_logger->LogDebug("Lazy symbols");
-		ParseDynamicTable(reader, ImportAddressSymbol, m_header.dyldInfo.lazy_bind_off, m_header.dyldInfo.lazy_bind_size, GlobalBinding);
+		ParseDynamicTable(reader, header, ImportAddressSymbol, header.dyldInfo.lazy_bind_off, header.dyldInfo.lazy_bind_size, GlobalBinding);
 		m_logger->LogDebug("Chained Fixups");
-		ParseChainedFixups();
-		if (m_header.exportTrie.dataoff)
-			ParseExportTrie(reader);
+		ParseChainedFixups(header.chainedFixups);
+		if (header.exportTrie.dataoff)
+			ParseExportTrie(reader, header.exportTrie);
 
 		//Then process the symtab
-		if (m_header.stringListSize == 0)
+		if (header.stringListSize == 0)
 			return;
 		reader.Seek(symtab.symoff);
 
 		unordered_map<size_t, vector<std::pair<section_64*, size_t>>> stubSymbols;
-		for (auto& symbolStubs : m_header.symbolStubSections)
+		for (auto& symbolStubs : header.symbolStubSections)
 		{
 			if (!symbolStubs.reserved2)
 				continue;
@@ -2391,7 +2397,7 @@ void MachoView::ParseSymbolTable(BinaryReader& reader, const symtab_command& sym
 				// Apple's source code
 				uint8_t  sectionType  = (symbolStubs.flags & SECTION_TYPE);
 				bool selfModifyingStub = (sectionType == S_SYMBOL_STUBS) && (symbolStubs.flags & S_ATTR_SELF_MODIFYING_CODE) &&
-					(symbolStubs.reserved2 == 5) && (m_header.ident.cputype == MACHO_CPU_TYPE_X86);
+					(symbolStubs.reserved2 == 5) && (header.ident.cputype == MACHO_CPU_TYPE_X86);
 				uint32_t elementSize = selfModifyingStub ? symbolStubs.reserved2 : m_arch->GetAddressSize();
 				auto symNum = indirectSymbols[j + symbolStubs.reserved1];
 				if (symNum == INDIRECT_SYMBOL_ABS)
@@ -2405,13 +2411,13 @@ void MachoView::ParseSymbolTable(BinaryReader& reader, const symtab_command& sym
 		}
 
 		unordered_map<size_t, vector<std::pair<section_64*, size_t>>> pointerSymbols;
-		for (auto& symbolPointerSection : m_header.symbolPointerSections)
+		for (auto& symbolPointerSection : header.symbolPointerSections)
 		{
 			// Not exactly sure what the following 3 variables are for but this is the check done in
 			// Apple's source code
 			uint8_t  sectionType  = (symbolPointerSection.flags & SECTION_TYPE);
 			bool selfModifyingStub = (sectionType == S_SYMBOL_STUBS) && (symbolPointerSection.flags & S_ATTR_SELF_MODIFYING_CODE) &&
-				(symbolPointerSection.reserved2 == 5) && (m_header.ident.cputype == MACHO_CPU_TYPE_X86);
+				(symbolPointerSection.reserved2 == 5) && (header.ident.cputype == MACHO_CPU_TYPE_X86);
 			uint32_t elementSize = selfModifyingStub ? symbolPointerSection.reserved2 : m_arch->GetAddressSize();
 			size_t needed = symbolPointerSection.size / m_addressSize;
 			for (size_t j = 0; (j < needed) && ((j + symbolPointerSection.reserved1) < indirectSymbols.size()); j++)
@@ -2440,7 +2446,7 @@ void MachoView::ParseSymbolTable(BinaryReader& reader, const symtab_command& sym
 			if (sym.n_strx >= symtab.strsize || ((sym.n_type & N_TYPE) == N_INDR))
 				continue;
 
-			string symbol((char*)m_header.stringList->GetDataAt(sym.n_strx));
+			string symbol((char*)header.stringList->GetDataAt(sym.n_strx));
 			m_symbols.push_back(symbol);
 			//otool ignores symbols that end with ".o", startwith "ltmp" or are "gcc_compiled." so do we
 			if (symbol == "gcc_compiled." ||
@@ -2455,13 +2461,13 @@ void MachoView::ParseSymbolTable(BinaryReader& reader, const symtab_command& sym
 			//Very curious to see how other tools handle it.
 			BNSymbolType type = DataSymbol;
 			uint32_t flags;
-			if ((sym.n_type & N_TYPE) == N_SECT && sym.n_sect > 0 && (size_t)(sym.n_sect - 1) < m_header.sections.size())
+			if ((sym.n_type & N_TYPE) == N_SECT && sym.n_sect > 0 && (size_t)(sym.n_sect - 1) < header.sections.size())
 			{
-				if (!GetSectionPermissions(sym.n_value, flags))
+				if (!GetSectionPermissions(header, sym.n_value, flags))
 				{
 					if ((sym.n_type & N_EXT))
 					{
-						if (!GetSegmentPermissions(sym.n_value, flags))
+						if (!GetSegmentPermissions(header, sym.n_value, flags))
 						{
 							m_logger->LogDebug("No valid segment for symbol %s. value:%" PRIx64, symbol.c_str(), sym.n_value);
 							continue;
@@ -2477,7 +2483,7 @@ void MachoView::ParseSymbolTable(BinaryReader& reader, const symtab_command& sym
 			else if ((sym.n_type & N_TYPE) == N_ABS)
 			{
 				//N_ABS symbols do not have a section. Fall back to segment permissions.
-				if (!GetSegmentPermissions(sym.n_value, flags))
+				if (!GetSegmentPermissions(header, sym.n_value, flags))
 				{
 					m_logger->LogDebug("No valid segment for symbol %s. value:%" PRIx64, symbol.c_str(), sym.n_value);
 					continue;
@@ -2506,15 +2512,15 @@ void MachoView::ParseSymbolTable(BinaryReader& reader, const symtab_command& sym
 			bool deferred = stubSymbolIter == stubSymbols.end() && pointerSymbolIter == pointerSymbols.end();
 
 			Ref<Symbol> symbolObj;
-			if(m_header.dysymtab.nlocalsym && i >= m_header.dysymtab.ilocalsym && i < m_header.dysymtab.ilocalsym + m_header.dysymtab.nlocalsym)
+			if(header.dysymtab.nlocalsym && i >= header.dysymtab.ilocalsym && i < header.dysymtab.ilocalsym + header.dysymtab.nlocalsym)
 			{
 				symbolObj = DefineMachoSymbol(type, symbol, sym.n_value, LocalBinding, deferred);
 			}
-			else if (m_header.dysymtab.nextdefsym && i >= m_header.dysymtab.iextdefsym && i < m_header.dysymtab.iextdefsym + m_header.dysymtab.nextdefsym)
+			else if (header.dysymtab.nextdefsym && i >= header.dysymtab.iextdefsym && i < header.dysymtab.iextdefsym + header.dysymtab.nextdefsym)
 			{
 				symbolObj = DefineMachoSymbol(type, symbol, sym.n_value, GlobalBinding, deferred);
 			}
-			else if (m_header.dysymtab.nundefsym && i >= m_header.dysymtab.iundefsym && i < m_header.dysymtab.iundefsym + m_header.dysymtab.nundefsym)
+			else if (header.dysymtab.nundefsym && i >= header.dysymtab.iundefsym && i < header.dysymtab.iundefsym + header.dysymtab.nundefsym)
 			{
 				symbolObj = DefineMachoSymbol(type, symbol, sym.n_value, GlobalBinding, deferred);
 			}
@@ -2565,9 +2571,9 @@ void MachoView::ParseSymbolTable(BinaryReader& reader, const symtab_command& sym
 
 
 
-void MachoView::ParseChainedFixups()
+void MachoView::ParseChainedFixups(linkedit_data_command chainedFixups)
 {
-	if (!m_header.chainedFixups.dataoff)
+	if (!chainedFixups.dataoff)
 		return;
 
 	m_logger->LogDebug("Processing Chained Fixups");
@@ -2586,7 +2592,7 @@ void MachoView::ParseChainedFixups()
 
 	try {
 		dyld_chained_fixups_header fixupsHeader {};
-		uint64_t fixupHeaderAddress = m_universalImageOffset + m_header.chainedFixups.dataoff;
+		uint64_t fixupHeaderAddress = m_universalImageOffset + chainedFixups.dataoff;
 		parentReader.Seek(fixupHeaderAddress);
 		fixupsHeader.fixups_version = parentReader.Read32();
 		fixupsHeader.starts_offset = parentReader.Read32();
@@ -2607,7 +2613,7 @@ void MachoView::ParseChainedFixups()
 			return;
 		}
 
-		if (importTableSize > m_header.chainedFixups.datasize)
+		if (importTableSize > chainedFixups.datasize)
 		{
 			m_logger->LogError("Chained Fixup parsing failed. Binary is malformed");
 			return;
