@@ -1318,6 +1318,7 @@ namespace BinaryNinja
 
 	class MachoViewType: public BinaryViewType
 	{
+		Ref<Logger> m_logger;
 	public:
 		MachoViewType();
 		virtual Ref<BinaryView> Create(BinaryView* data) override;

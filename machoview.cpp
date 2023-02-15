@@ -278,12 +278,12 @@ MachoView::MachoView(const string& typeName, BinaryView* data, bool parseOnly): 
 	if (m_ident.magic == MH_MAGIC || m_ident.magic == MH_MAGIC_64)
 	{
 		m_endian = LittleEndian;
-		LogDebug("Recognized Little Endian Mach-O");
+		m_logger->LogDebug("Recognized Little Endian Mach-O");
 	}
 	else // (m_ident.magic == MH_CIGAM || m_ident.magic == MH_CIGAM_64)
 	{
 		m_endian = BigEndian;
-		LogDebug("Recognized Big Endian Mach-O");
+		m_logger->LogDebug("Recognized Big Endian Mach-O");
 	}
 
 	BinaryReader reader(data);
@@ -301,7 +301,7 @@ MachoView::MachoView(const string& typeName, BinaryView* data, bool parseOnly): 
 	// Parse segment commands
 	try
 	{
-		LogDebug("ident.ncmds: %d\n", m_ident.ncmds);
+		m_logger->LogDebug("ident.ncmds: %d\n", m_ident.ncmds);
 		for (size_t i = 0; i < m_ident.ncmds; i++)
 		{
 			load_command load;
@@ -312,7 +312,7 @@ MachoView::MachoView(const string& typeName, BinaryView* data, bool parseOnly): 
 			load.cmd = reader.Read32();
 			load.cmdsize = reader.Read32();
 			size_t nextOffset = curOffset + load.cmdsize;
-			LogDebug("Segment cmd: %08x - cmdsize: %08x - ", load.cmd, load.cmdsize);
+			m_logger->LogDebug("Segment cmd: %08x - cmdsize: %08x - ", load.cmd, load.cmdsize);
 			if (load.cmdsize < sizeof(load_command))
 				throw MachoFormatException("unable to read header");
 
@@ -321,13 +321,13 @@ MachoView::MachoView(const string& typeName, BinaryView* data, bool parseOnly): 
 				case LC_MAIN:
 				{
 					uint64_t entryPoint = reader.Read64();
-					LogDebug("LC_MAIN entryPoint: %#016" PRIx64, entryPoint);
+					m_logger->LogDebug("LC_MAIN entryPoint: %#016" PRIx64, entryPoint);
 					entryPoints.push_back({entryPoint, true});
 					(void)reader.Read64(); // Stack start
 					break;
 				}
 				case LC_SEGMENT: //map the 32bit version to 64 bits
-					LogDebug("LC_SEGMENT\n");
+					m_logger->LogDebug("LC_SEGMENT\n");
 					segment64.cmd = LC_SEGMENT_64;
 					reader.Read(&segment64.segname, 16);
 					segment64.vmaddr = reader.Read32();
@@ -347,7 +347,7 @@ MachoView::MachoView(const string& typeName, BinaryView* data, bool parseOnly): 
 							first = false;
 						}
 					}
-					LogDebug("\tName:     %s\n" \
+					m_logger->LogDebug("\tName:     %s\n" \
 							"\tCmd:      %#08"  PRIx32 "\n" \
 							"\tvmaddr:   %#016" PRIx64 "\n" \
 							"\tvmsize:   %#016" PRIx64 "\n" \
@@ -384,9 +384,9 @@ MachoView::MachoView(const string& typeName, BinaryView* data, bool parseOnly): 
 						if (segment64.vmsize > 0)
 							m_sections.push_back(sect);
 						else
-							LogInfo("Omitting section %16s at %#" PRIx64 " corresponding to segment %16s which is not mapped into memory", (char*)&sect.sectname, sect.addr, (char*)&sect.segname);
+							m_logger->LogInfo("Omitting section %16s at %#" PRIx64 " corresponding to segment %16s which is not mapped into memory", (char*)&sect.sectname, sect.addr, (char*)&sect.segname);
 
-						LogDebug("\t\tSegName:  %16s\n" \
+						m_logger->LogDebug("\t\tSegName:  %16s\n" \
 								"\t\tSectName: %16s\n" \
 								"\t\tAddr:     %#" PRIx64 "\n" \
 								"\t\tSize:     %#" PRIx64 "\n" \
@@ -421,7 +421,7 @@ MachoView::MachoView(const string& typeName, BinaryView* data, bool parseOnly): 
 					m_segments.push_back(segment64);
 					break;
 				case LC_SEGMENT_64:
-					LogDebug("LC_SEGMENT_64\n");
+					m_logger->LogDebug("LC_SEGMENT_64\n");
 					segment64.cmd = LC_SEGMENT_64;
 					reader.Read(&segment64.segname, 16);
 					segment64.vmaddr = reader.Read64();
@@ -441,7 +441,7 @@ MachoView::MachoView(const string& typeName, BinaryView* data, bool parseOnly): 
 							first = false;
 						}
 					}
-					LogDebug(
+					m_logger->LogDebug(
 							"\tName:     %s\n" \
 							"\tCmd:      %#08"  PRIx32 "\n" \
 							"\tvmaddr:   %#016" PRIx64 "\n" \
@@ -462,7 +462,7 @@ MachoView::MachoView(const string& typeName, BinaryView* data, bool parseOnly): 
 							segment64.initprot,
 							segment64.nsects,
 							segment64.flags);
-					LogDebug("\t\t------------------------\n");
+					m_logger->LogDebug("\t\t------------------------\n");
 					for (size_t j = 0; j < segment64.nsects; j++)
 					{
 						reader.Read(&sect.sectname, 16);
@@ -481,8 +481,8 @@ MachoView::MachoView(const string& typeName, BinaryView* data, bool parseOnly): 
 						if (segment64.vmsize > 0)
 							m_sections.push_back(sect);
 						else
-							LogInfo("Omitting section %16s at %#" PRIx64 " corresponding to segment %16s which is not mapped into memory", (char*)&sect.sectname, sect.addr, (char*)&sect.segname);
-						LogDebug(
+							m_logger->LogInfo("Omitting section %16s at %#" PRIx64 " corresponding to segment %16s which is not mapped into memory", (char*)&sect.sectname, sect.addr, (char*)&sect.segname);
+						m_logger->LogDebug(
 								"\t\tSegName:  %16s\n" \
 								"\t\tSectName: %16s\n" \
 								"\t\tAddr:     %#" PRIx64 "\n" \
@@ -520,7 +520,7 @@ MachoView::MachoView(const string& typeName, BinaryView* data, bool parseOnly): 
 					m_segments.push_back(segment64);
 					break;
 				case LC_ROUTINES: //map the 32bit version to 64bits
-					LogDebug("LC_REOUTINES\n");
+					m_logger->LogDebug("LC_REOUTINES\n");
 					m_routines64.cmd = LC_ROUTINES_64;
 					m_routines64.init_address = reader.Read32();
 					m_routines64.init_module = reader.Read32();
@@ -531,11 +531,11 @@ MachoView::MachoView(const string& typeName, BinaryView* data, bool parseOnly): 
 					m_routines64.reserved5 = reader.Read32();
 					m_routines64.reserved6 = reader.Read32();
 					m_routinesPresent = true;
-					LogDebug("\tinit_address: %016" PRIx64 "\n\tinit_module: %08" PRIx64 "\n",
+					m_logger->LogDebug("\tinit_address: %016" PRIx64 "\n\tinit_module: %08" PRIx64 "\n",
 							m_routines64.init_address, m_routines64.init_module);
 					break;
 				case LC_ROUTINES_64:
-					LogDebug("LC_REOUTINES_64\n");
+					m_logger->LogDebug("LC_REOUTINES_64\n");
 					m_routines64.cmd = LC_ROUTINES_64;
 					m_routines64.init_address = reader.Read64();
 					m_routines64.init_module = reader.Read64();
@@ -546,19 +546,19 @@ MachoView::MachoView(const string& typeName, BinaryView* data, bool parseOnly): 
 					m_routines64.reserved5 = reader.Read64();
 					m_routines64.reserved6 = reader.Read64();
 					m_routinesPresent = true;
-					LogDebug("\tinit_address: %016" PRIx64 "\n\tinit_module: %08" PRIx64 "\n",
+					m_logger->LogDebug("\tinit_address: %016" PRIx64 "\n\tinit_module: %08" PRIx64 "\n",
 							m_routines64.init_address, m_routines64.init_module);
 					break;
 				case LC_FUNCTION_STARTS:
-					LogDebug("LC_FUNCTION_STARTS\n");
+					m_logger->LogDebug("LC_FUNCTION_STARTS\n");
 					m_functionStarts.funcoff = reader.Read32();
 					m_functionStarts.funcsize = reader.Read32();
 					m_functionStartsPresent = true;
-					LogDebug("\tFunction Starts:\n\toffset: %#08" PRIx32 "\n\tsize: %#08" PRIx32 "\n",
+					m_logger->LogDebug("\tFunction Starts:\n\toffset: %#08" PRIx32 "\n\tsize: %#08" PRIx32 "\n",
 							m_functionStarts.funcoff, m_functionStarts.funcsize);
 					break;
 				case LC_SYMTAB:
-					LogDebug("LC_SYMTAB\n");
+					m_logger->LogDebug("LC_SYMTAB\n");
 					m_symtab.symoff  = reader.Read32();
 					m_symtab.nsyms   = reader.Read32();
 					m_symtab.stroff  = reader.Read32();
@@ -566,7 +566,7 @@ MachoView::MachoView(const string& typeName, BinaryView* data, bool parseOnly): 
 					reader.Seek(m_symtab.stroff);
 					m_stringList = reader.Read(m_symtab.strsize);
 					m_stringListSize = m_symtab.strsize;
-					LogDebug("\tstrsize: %08x\n" \
+					m_logger->LogDebug("\tstrsize: %08x\n" \
 							"\tstroff: %08x\n" \
 							"\tnsyms: %08x\n",
 							m_symtab.strsize,
@@ -574,7 +574,7 @@ MachoView::MachoView(const string& typeName, BinaryView* data, bool parseOnly): 
 							m_symtab.nsyms);
 					break;
 				case LC_DYSYMTAB:
-					LogDebug("LC_DYSYMTAB\n");
+					m_logger->LogDebug("LC_DYSYMTAB\n");
 					m_dysymtab.ilocalsym = reader.Read32();
 					m_dysymtab.nlocalsym = reader.Read32();
 					m_dysymtab.iextdefsym = reader.Read32();
@@ -593,7 +593,7 @@ MachoView::MachoView(const string& typeName, BinaryView* data, bool parseOnly): 
 					m_dysymtab.nextrel = reader.Read32();
 					m_dysymtab.locreloff = reader.Read32();
 					m_dysymtab.nlocrel = reader.Read32();
-					LogDebug("\tm_dysymtab.ilocalsym      0x%08x\n"\
+					m_logger->LogDebug("\tm_dysymtab.ilocalsym      0x%08x\n"\
 					         "\tm_dysymtab.nlocalsym      0x%08x\n"\
 					         "\tm_dysymtab.iextdefsym     0x%08x\n"\
 					         "\tm_dysymtab.nextdefsym     0x%08x\n"\
@@ -632,13 +632,13 @@ MachoView::MachoView(const string& typeName, BinaryView* data, bool parseOnly): 
 					m_dysymPresent = true;
 					break;
 				case LC_DYLD_CHAINED_FIXUPS:
-					LogDebug("LC_DYLD_CHAINED_FIXUPS\n");
+					m_logger->LogDebug("LC_DYLD_CHAINED_FIXUPS\n");
 					m_chainedFixups.dataoff = reader.Read32();
 					m_chainedFixups.datasize = reader.Read32();
 					break;
 				case LC_DYLD_INFO:
 				case LC_DYLD_INFO_ONLY:
-					LogDebug("LC_DYLD_INFO\n");
+					m_logger->LogDebug("LC_DYLD_INFO\n");
 					m_dyldInfo.rebase_off = reader.Read32();
 					m_dyldInfo.rebase_size = reader.Read32();
 					m_dyldInfo.bind_off = reader.Read32();
@@ -654,7 +654,7 @@ MachoView::MachoView(const string& typeName, BinaryView* data, bool parseOnly): 
 					m_dyldInfoPresent = true;
 					break;
 				case LC_DYLD_EXPORTS_TRIE:
-					LogDebug("LC_DYLD_EXPORTS_TRIE\n");
+					m_logger->LogDebug("LC_DYLD_EXPORTS_TRIE\n");
 					m_exportTrie.dataoff = reader.Read32();
 					m_exportTrie.datasize = reader.Read32();
 					break;
@@ -665,11 +665,11 @@ MachoView::MachoView(const string& typeName, BinaryView* data, bool parseOnly): 
 						thread_command thread;
 						thread.flavor = reader.Read32();
 						thread.count = reader.Read32();
-						LogDebug("LC_THREAD\\LC_UNIXTHREAD\n");
+						m_logger->LogDebug("LC_THREAD\\LC_UNIXTHREAD\n");
 						switch (m_archId)
 						{
 						case MachOx64:
-							LogDebug("x86_64 Thread state\n");
+							m_logger->LogDebug("x86_64 Thread state\n");
 							if (thread.flavor != X86_THREAD_STATE64)
 							{
 								reader.SeekRelative(thread.count * sizeof(uint32_t));
@@ -680,7 +680,7 @@ MachoView::MachoView(const string& typeName, BinaryView* data, bool parseOnly): 
 							entryPoints.push_back({thread.statex64.rip, false});
 							break;
 						case MachOx86:
-							LogDebug("x86 Thread state\n");
+							m_logger->LogDebug("x86 Thread state\n");
 							if (thread.flavor != X86_THREAD_STATE32)
 							{
 								reader.SeekRelative(thread.count * sizeof(uint32_t));
@@ -691,7 +691,7 @@ MachoView::MachoView(const string& typeName, BinaryView* data, bool parseOnly): 
 							entryPoints.push_back({thread.statex86.eip, false});
 							break;
 						case MachOArm:
-							LogDebug("Arm Thread state\n");
+							m_logger->LogDebug("Arm Thread state\n");
 							if (thread.flavor != _ARM_THREAD_STATE)
 							{
 								reader.SeekRelative(thread.count * sizeof(uint32_t));
@@ -703,7 +703,7 @@ MachoView::MachoView(const string& typeName, BinaryView* data, bool parseOnly): 
 							break;
 						case MachOAarch64:
 						case MachOAarch6432:
-							LogDebug("Aarch64 Thread state\n");
+							m_logger->LogDebug("Aarch64 Thread state\n");
 							if (thread.flavor != _ARM_THREAD_STATE64)
 							{
 								reader.SeekRelative(thread.count * sizeof(uint32_t));
@@ -713,7 +713,7 @@ MachoView::MachoView(const string& typeName, BinaryView* data, bool parseOnly): 
 							entryPoints.push_back({thread.stateaarch64.pc, false});
 							break;
 						case MachOPPC:
-							LogDebug("PPC Thread state\n");
+							m_logger->LogDebug("PPC Thread state\n");
 							if (thread.flavor != PPC_THREAD_STATE)
 							{
 								reader.SeekRelative(thread.count * sizeof(uint32_t));
@@ -727,7 +727,7 @@ MachoView::MachoView(const string& typeName, BinaryView* data, bool parseOnly): 
 							(void)reader.Read(&thread.stateppc.r1, sizeof(thread.stateppc) - (3 * 4));
 							break;
 						case MachOPPC64:
-							LogDebug("PPC64 Thread state\n");
+							m_logger->LogDebug("PPC64 Thread state\n");
 							if (thread.flavor != PPC_THREAD_STATE64)
 							{
 								reader.SeekRelative(thread.count * sizeof(uint32_t));
@@ -739,7 +739,7 @@ MachoView::MachoView(const string& typeName, BinaryView* data, bool parseOnly): 
 							(void)reader.Read(&thread.stateppc64.r1, sizeof(thread.stateppc64) - (3 * 8));
 							break;
 						default:
-							LogError("Unknown archid: %x", m_archId);
+							m_logger->LogError("Unknown archid: %x", m_archId);
 						}
 					}
 					break;
@@ -756,20 +756,20 @@ MachoView::MachoView(const string& typeName, BinaryView* data, bool parseOnly): 
 					break;
 				case LC_BUILD_VERSION:
 				{
-					LogDebug("LC_BUILD_VERSION:");
+					m_logger->LogDebug("LC_BUILD_VERSION:");
 					m_buildVersion.platform = reader.Read32();
 					m_buildVersion.minos = reader.Read32();
 					m_buildVersion.sdk = reader.Read32();
 					m_buildVersion.ntools = reader.Read32();
-					LogDebug("Platform: %s", BuildPlatformToString(m_buildVersion.platform).c_str());
-					LogDebug("MinOS: %s", BuildToolVersionToString(m_buildVersion.minos).c_str());
-					LogDebug("SDK: %s", BuildToolVersionToString(m_buildVersion.sdk).c_str());
+					m_logger->LogDebug("Platform: %s", BuildPlatformToString(m_buildVersion.platform).c_str());
+					m_logger->LogDebug("MinOS: %s", BuildToolVersionToString(m_buildVersion.minos).c_str());
+					m_logger->LogDebug("SDK: %s", BuildToolVersionToString(m_buildVersion.sdk).c_str());
 					for (uint32_t i = 0; (i < m_buildVersion.ntools) && (i < 10); i++)
 					{
 						uint32_t tool = reader.Read32();
 						uint32_t version = reader.Read32();
 						m_buildToolVersions.push_back({tool, version});
-						LogDebug("Build Tool: %s: %s", BuildToolToString(tool).c_str(), BuildToolVersionToString(version).c_str());
+						m_logger->LogDebug("Build Tool: %s: %s", BuildToolToString(tool).c_str(), BuildToolVersionToString(version).c_str());
 					}
 					break;
 				}
@@ -803,12 +803,12 @@ MachoView::MachoView(const string& typeName, BinaryView* data, bool parseOnly): 
 				// case LC_DATA_IN_CODE:         LogDebug("LC_DATA_IN_CODE");         bytesRead = sizeof(load); break;
 				// case LC_DYLIB_CODE_SIGN_DRS:  LogDebug("LC_DYLIB_CODE_SIGN_DRS");  bytesRead = sizeof(load); break;
 				default:
-					LogDebug("Unhandled command: %s : %" PRIu32 "\n", CommandToString(load.cmd).c_str(), load.cmdsize);
+					m_logger->LogDebug("Unhandled command: %s : %" PRIu32 "\n", CommandToString(load.cmd).c_str(), load.cmdsize);
 					break;
 			}
 			if (reader.GetOffset() != nextOffset)
 			{
-				LogDebug("Didn't parse load command: %s fully %" PRIx64 ":%" PRIxPTR, CommandToString(load.cmd).c_str(), reader.GetOffset(), nextOffset);
+				m_logger->LogDebug("Didn't parse load command: %s fully %" PRIx64 ":%" PRIxPTR, CommandToString(load.cmd).c_str(), reader.GetOffset(), nextOffset);
 			}
 			reader.Seek(nextOffset);
 		}
@@ -839,7 +839,7 @@ void MachoView::RebaseThreadStarts(BinaryReader& virtualReader, vector<uint32_t>
 		if (threadStart == 0xffffffff)
 			break;
 
-		LogDebug("Rebasing thread chain start: 0x%x", threadStart);
+		m_logger->LogDebug("Rebasing thread chain start: 0x%x", threadStart);
 		try
 		{
 			uint64_t curAddr = imageBase + threadStart;
@@ -848,7 +848,7 @@ void MachoView::RebaseThreadStarts(BinaryReader& virtualReader, vector<uint32_t>
 			{
 				if (!IsOffsetBackedByFile(virtualReader.GetOffset()))
 				{
-					LogError("Chained address: 0x%" PRIx64 " in thread start: 0x%x not backed by file!", virtualReader.GetOffset(), threadStart);
+					m_logger->LogError("Chained address: 0x%" PRIx64 " in thread start: 0x%x not backed by file!", virtualReader.GetOffset(), threadStart);
 					break;
 				}
 
@@ -891,13 +891,13 @@ void MachoView::RebaseThreadStarts(BinaryReader& virtualReader, vector<uint32_t>
 		}
 		catch (ReadException&)
 		{
-			LogError("Failed rebasing thread start at: 0x%x", threadStart);
+			m_logger->LogError("Failed rebasing thread start at: 0x%x", threadStart);
 		}
 	}
 
 	std::chrono::steady_clock::time_point end = std::chrono::steady_clock::now();
 	double t = std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count() / 1000.0;
-	LogInfo("Rebasing thread starts took %.3f seconds. Updated %" PRIuPTR " pointers (authenticated: %" PRIuPTR ", regular: %" PRIuPTR ").", t, numAuth + numReg, numAuth, numReg);
+	m_logger->LogInfo("Rebasing thread starts took %.3f seconds. Updated %" PRIuPTR " pointers (authenticated: %" PRIuPTR ", regular: %" PRIuPTR ").", t, numAuth + numReg, numAuth, numReg);
 }
 
 
@@ -947,17 +947,17 @@ void MachoView::ParseFunctionStarts(Platform* platform)
 			uint64_t target = curfunc;
 			if (!IsValidFunctionStart(target))
 			{
-				LogWarn("Possible error processing LC_FUNCTION_STARTS! Not adding function at: 0x%" PRIx64 "\n", target);
+				m_logger->LogWarn("Possible error processing LC_FUNCTION_STARTS! Not adding function at: 0x%" PRIx64 "\n", target);
 				continue;
 			}
 			Ref<Platform> targetPlatform = platform->GetAssociatedPlatformByAddress(target);
 			AddFunctionForAnalysis(targetPlatform, target);
-			LogDebug("Adding function start: %#" PRIx64 "\n", curfunc);
+			m_logger->LogDebug("Adding function start: %#" PRIx64 "\n", curfunc);
 		}
 	}
 	catch (ReadException&)
 	{
-		LogDebug("LC_FUNCTION_STARTS command invalid");
+		m_logger->LogDebug("LC_FUNCTION_STARTS command invalid");
 	}
 }
 
@@ -980,15 +980,15 @@ bool MachoView::ParseRelocationEntry(const relocation_info& info, uint64_t start
 	// 	size_t sectionIndex; // Index into the section table
 	// 	uint64_t address;    // Absolute address or segment offset
 	// };
-	LogDebug("\tr_address:   %" PRIx32 " + %" PRIx64 " = %" PRIx64, info.r_address, start, info.r_address + start);
-	LogDebug("\tr_symbolnum: %" PRIx32, info.r_symbolnum);
-	LogDebug("\tr_pcrel:     %" PRIx32, info.r_pcrel);
-	LogDebug("\tr_length:    %" PRIx32, info.r_length);
-	LogDebug("\tr_extern:    %" PRIx32, info.r_extern);
-	LogDebug("\tr_type:      %" PRIx32, info.r_type);
+	m_logger->LogDebug("\tr_address:   %" PRIx32 " + %" PRIx64 " = %" PRIx64, info.r_address, start, info.r_address + start);
+	m_logger->LogDebug("\tr_symbolnum: %" PRIx32, info.r_symbolnum);
+	m_logger->LogDebug("\tr_pcrel:     %" PRIx32, info.r_pcrel);
+	m_logger->LogDebug("\tr_length:    %" PRIx32, info.r_length);
+	m_logger->LogDebug("\tr_extern:    %" PRIx32, info.r_extern);
+	m_logger->LogDebug("\tr_type:      %" PRIx32, info.r_type);
 	if (m_objectFile && (info.r_address & R_SCATTERED))
 	{
-		LogError("Scattered Relocations not currently supported");
+		m_logger->LogError("Scattered Relocations not currently supported");
 		return false;
 	}
 
@@ -1263,9 +1263,9 @@ bool MachoView::Init()
 		bool is64Bit;
 		string archName = UniversalViewType::ArchitectureToString(m_archId, 0, is64Bit);
 		if (!archName.empty())
-			LogError("Mach-O architecture '%s' is not explicitly supported. Try 'Open with Options' to manually select a compatible architecture.", archName.c_str());
+			m_logger->LogError("Mach-O architecture '%s' is not explicitly supported. Try 'Open with Options' to manually select a compatible architecture.", archName.c_str());
 		else
-			LogError("Mach-O architecture 0x%x is not explicitly supported. Try 'Open with Options' to manually select a compatible architecture.", m_archId);
+			m_logger->LogError("Mach-O architecture 0x%x is not explicitly supported. Try 'Open with Options' to manually select a compatible architecture.", m_archId);
 
 		return false;
 	}
@@ -1328,7 +1328,7 @@ bool MachoView::Init()
 				typeLib = typeLibs[0];
 				AddTypeLibrary(typeLib);
 
-				LogDebug("mach-o: adding type library for '%s': %s (%s)",
+				m_logger->LogDebug("mach-o: adding type library for '%s': %s (%s)",
 						l.c_str(), typeLib->GetName().c_str(), typeLib->GetGuid().c_str());
 			}
 		}
@@ -1385,7 +1385,7 @@ bool MachoView::Init()
 	}
 	catch (ReadException&)
 	{
-		LogError("Failed to read indirect symbol data");
+		m_logger->LogError("Failed to read indirect symbol data");
 	}
 
 	BeginBulkModifySymbols();
@@ -1394,12 +1394,12 @@ bool MachoView::Init()
 	try
 	{
 		// Add functions for all function symbols
-		LogDebug("Parsing symbol table\n");
+		m_logger->LogDebug("Parsing symbol table\n");
 		ParseSymbolTable(reader, m_symtab, indirectSymbols);
 	}
 	catch (std::exception&)
 	{
-		LogError("Failed to parse symbol table!");
+		m_logger->LogError("Failed to parse symbol table!");
 	}
 
 	m_symbolQueue->Process();
@@ -1414,7 +1414,7 @@ bool MachoView::Init()
 
 	if (parseFunctionStarts)
 	{
-		LogDebug("Parsing function starts\n");
+		m_logger->LogDebug("Parsing function starts\n");
 		ParseFunctionStarts(platform);
 	}
 
@@ -1435,11 +1435,11 @@ bool MachoView::Init()
 				memcpy(sectionName, section.sectname, sizeof(section.sectname));
 				sectionName[16] = 0;
 
-				LogDebug("Relocations for section %s", sectionName);
+				m_logger->LogDebug("Relocations for section %s", sectionName);
 				auto sec = GetSectionByName(sectionName);
 				if (!sec)
 				{
-					LogError("Can't find section for %s", sectionName);
+					m_logger->LogError("Can't find section for %s", sectionName);
 					continue;
 				}
 				for (size_t i = 0; i < section.nreloc; i++)
@@ -1548,7 +1548,7 @@ bool MachoView::Init()
 		}
 		catch (ReadException&)
 		{
-			LogError("Failed to read relocation data");
+			m_logger->LogError("Failed to read relocation data");
 		}
 	}
 
@@ -2055,13 +2055,13 @@ bool MachoView::Init()
 		}
 		catch (ReadException&)
 		{
-			LogError("Error when applying Mach-O header types at %" PRIx64, imageBase);
+			m_logger->LogError("Error when applying Mach-O header types at %" PRIx64, imageBase);
 		}
 	}
 
 	std::chrono::steady_clock::time_point endTime = std::chrono::steady_clock::now();
 	double t = std::chrono::duration_cast<std::chrono::milliseconds>(endTime - startTime).count() / 1000.0;
-	LogInfo("Mach-O parsing took %.3f seconds\n", t);
+	m_logger->LogInfo("Mach-O parsing took %.3f seconds\n", t);
 	return true;
 }
 
@@ -2108,7 +2108,7 @@ Ref<Symbol> MachoView::DefineMachoSymbol(
 		symbolTypeRef = ImportTypeLibraryObject(appliedLib, n);
 		if (symbolTypeRef)
 		{
-			LogDebug("mach-o: type Library '%s' found hit for '%s'", appliedLib->GetName().c_str(), name.c_str());
+			m_logger->LogDebug("mach-o: type Library '%s' found hit for '%s'", appliedLib->GetName().c_str(), name.c_str());
 			RecordImportedObjectLibrary(GetDefaultPlatform(), addr, appliedLib, n);
 		}
 	}
@@ -2148,7 +2148,7 @@ Ref<Symbol> MachoView::DefineMachoSymbol(
 				}
 				else
 				{
-					LogDebug("Failed to demangle name: '%s'\n", rawName.c_str());
+					m_logger->LogDebug("Failed to demangle name: '%s'\n", rawName.c_str());
 				}
 			}
 		}
@@ -2214,7 +2214,7 @@ void MachoView::ParseExportTrie(BinaryReader& reader)
 
 		for (auto node : nodes)
 		{
-			// LogError("%s: 0x%llx", node.text.c_str(), node.offset);
+			// m_logger->LogError("%s: 0x%llx", node.text.c_str(), node.offset);
 			if ((!node.text.empty()))
 			{
 				uint64_t addr = node.offset + GetStart();
@@ -2224,7 +2224,7 @@ void MachoView::ParseExportTrie(BinaryReader& reader)
 	}
 	catch (ReadException&)
 	{
-		LogError("Error while parsing Export Trie");
+		m_logger->LogError("Error while parsing Export Trie");
 	}
 }
 
@@ -2377,11 +2377,11 @@ void MachoView::ParseSymbolTable(BinaryReader& reader, const symtab_command& sym
 	try
 	{
 		//First parse the imports
-		LogDebug("Bind symbols");
+		m_logger->LogDebug("Bind symbols");
 		ParseDynamicTable(reader, ImportAddressSymbol, m_dyldInfo.bind_off, m_dyldInfo.bind_size, GlobalBinding);
-		LogDebug("Weak symbols");
+		m_logger->LogDebug("Weak symbols");
 		ParseDynamicTable(reader, ImportAddressSymbol, m_dyldInfo.weak_bind_off, m_dyldInfo.weak_bind_size, WeakBinding);
-		LogDebug("Lazy symbols");
+		m_logger->LogDebug("Lazy symbols");
 		ParseDynamicTable(reader, ImportAddressSymbol, m_dyldInfo.lazy_bind_off, m_dyldInfo.lazy_bind_size, GlobalBinding);
 		m_logger->LogDebug("Chained Fixups");
 		ParseChainedFixups();
@@ -2462,7 +2462,7 @@ void MachoView::ParseSymbolTable(BinaryReader& reader, const symtab_command& sym
 				(symbol.length() > 2 && symbol.substr(symbol.length()-2, 2) == ".o") ||
 				(symbol.length() > 4 && symbol.substr(0, 4) == "ltmp"))
 			{
-				LogDebug("Skipping symbol: %s.", symbol.c_str());
+				m_logger->LogDebug("Skipping symbol: %s.", symbol.c_str());
 				continue;
 			}
 			//N_TYPE is only set when N_SECT is the integer count of the section the symbol is in
@@ -2478,13 +2478,13 @@ void MachoView::ParseSymbolTable(BinaryReader& reader, const symtab_command& sym
 					{
 						if (!GetSegmentPermissions(sym.n_value, flags))
 						{
-							LogDebug("No valid segment for symbol %s. value:%" PRIx64, symbol.c_str(), sym.n_value);
+							m_logger->LogDebug("No valid segment for symbol %s. value:%" PRIx64, symbol.c_str(), sym.n_value);
 							continue;
 						}
 					}
 					else
 					{
-						LogDebug("No valid section for symbol %s. value:%" PRIx64, symbol.c_str(), sym.n_value);
+						m_logger->LogDebug("No valid section for symbol %s. value:%" PRIx64, symbol.c_str(), sym.n_value);
 						continue;
 					}
 				}
@@ -2494,7 +2494,7 @@ void MachoView::ParseSymbolTable(BinaryReader& reader, const symtab_command& sym
 				//N_ABS symbols do not have a section. Fall back to segment permissions.
 				if (!GetSegmentPermissions(sym.n_value, flags))
 				{
-					LogDebug("No valid segment for symbol %s. value:%" PRIx64, symbol.c_str(), sym.n_value);
+					m_logger->LogDebug("No valid segment for symbol %s. value:%" PRIx64, symbol.c_str(), sym.n_value);
 					continue;
 				}
 			}
@@ -2542,7 +2542,7 @@ void MachoView::ParseSymbolTable(BinaryReader& reader, const symtab_command& sym
 			{
 				for (auto& j : stubSymbolIter->second)
 				{
-					// LogError("STUB [%d] %llx - %s", i, j.first->addr + (j * j.first->reserved2), symbol.c_str());
+					// m_logger->LogError("STUB [%d] %llx - %s", i, j.first->addr + (j * j.first->reserved2), symbol.c_str());
 					BNRelocationInfo info;
 					memset(&info, 0, sizeof(info));
 					info.nativeType = -1;
@@ -2558,7 +2558,7 @@ void MachoView::ParseSymbolTable(BinaryReader& reader, const symtab_command& sym
 			{
 				for (auto& j : pointerSymbolIter->second)
 				{
-					// LogError("POINTER [%d] %llx - %s", i, j.first->addr + (j.second * m_addressSize),
+					// m_logger->LogError("POINTER [%d] %llx - %s", i, j.first->addr + (j.second * m_addressSize),
 					// symbol.c_str());
 					BNRelocationInfo info;
 					memset(&info, 0, sizeof(info));
@@ -2995,6 +2995,7 @@ size_t MachoView::PerformGetAddressSize() const
 
 MachoViewType::MachoViewType(): BinaryViewType("Mach-O", "Mach-O")
 {
+	m_logger = LogRegistry::CreateLogger("BinaryView.MachoViewType");
 }
 
 
@@ -3006,7 +3007,7 @@ Ref<BinaryView> MachoViewType::Create(BinaryView* data)
 	}
 	catch (std::exception& e)
 	{
-		LogError("%s<BinaryViewType> failed to create view! '%s'", GetName().c_str(), e.what());
+		m_logger->LogError("%s<BinaryViewType> failed to create view! '%s'", GetName().c_str(), e.what());
 		return nullptr;
 	}
 }
@@ -3020,7 +3021,7 @@ Ref<BinaryView> MachoViewType::Parse(BinaryView* data)
 	}
 	catch (std::exception& e)
 	{
-		LogError("%s<BinaryViewType> failed to create view! '%s'", GetName().c_str(), e.what());
+		m_logger->LogError("%s<BinaryViewType> failed to create view! '%s'", GetName().c_str(), e.what());
 		return nullptr;
 	}
 }
@@ -3093,7 +3094,7 @@ uint64_t MachoViewType::ParseHeaders(BinaryView* data, uint64_t imageOffset, mac
 		ident.filetype == MH_PRELOAD ||
 		ident.filetype == MH_DSYM))
 	{
-		LogError("Unhandled Macho file class: 0x%x", ident.filetype);
+		m_logger->LogError("Unhandled Macho file class: 0x%x", ident.filetype);
 		errorMsg = "invalid file class";
 		return 0;
 	}
@@ -3131,7 +3132,7 @@ Ref<Settings> MachoViewType::GetLoadSettingsForData(BinaryView* data)
 	Ref<BinaryView> viewRef = Parse(data);
 	if (!viewRef || !viewRef->Init())
 	{
-		LogError("View type '%s' could not be created", GetName().c_str());
+		m_logger->LogError("View type '%s' could not be created", GetName().c_str());
 		return nullptr;
 	}
 
