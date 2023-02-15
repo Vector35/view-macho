@@ -202,14 +202,13 @@ uint64_t readValidULEB128(DataBuffer& buffer, size_t& cursor)
 
 
 MachoView::MachoView(const string& typeName, BinaryView* data, bool parseOnly): BinaryView(typeName, data->GetFile(), data),
-	m_universalImageOffset(0), m_parseOnly(parseOnly), m_stringListSize(0), m_relocationBase(0)
+	m_universalImageOffset(0), m_parseOnly(parseOnly)
 {
 	CreateLogger("BinaryView");
 	m_logger = CreateLogger("BinaryView.MachoView");
 
-	memset(&m_symtab, 0, sizeof(m_symtab));
-	memset(&m_dysymtab, 0, sizeof(m_dysymtab));
-	memset(&m_dyldInfo, 0, sizeof(m_dyldInfo));
+	bzero(&m_header, sizeof(MachOHeader));
+	m_header.stringList = new DataBuffer();
 
 	m_backedByDatabase = data->GetFile()->IsBackedByDatabase(typeName);
 
@@ -268,19 +267,18 @@ MachoView::MachoView(const string& typeName, BinaryView* data, bool parseOnly): 
 		}
 	}
 
-
 	// Read common header fields
 	string errorMsg;
-	m_loadCommandOffset = g_machoViewType->ParseHeaders(data, m_universalImageOffset, m_ident, &m_arch, &m_plat, errorMsg);
-	if (!m_loadCommandOffset)
+	m_header.loadCommandOffset = g_machoViewType->ParseHeaders(data, m_universalImageOffset, m_header.ident, &m_arch, &m_plat, errorMsg);
+	if (!m_header.loadCommandOffset)
 		throw MachoFormatException(errorMsg);
 
-	if (m_ident.magic == MH_MAGIC || m_ident.magic == MH_MAGIC_64)
+	if (m_header.ident.magic == MH_MAGIC || m_header.ident.magic == MH_MAGIC_64)
 	{
 		m_endian = LittleEndian;
 		m_logger->LogDebug("Recognized Little Endian Mach-O");
 	}
-	else // (m_ident.magic == MH_CIGAM || m_ident.magic == MH_CIGAM_64)
+	else // (m_header.ident.magic == MH_CIGAM || m_header.ident.magic == MH_CIGAM_64)
 	{
 		m_endian = BigEndian;
 		m_logger->LogDebug("Recognized Big Endian Mach-O");
@@ -289,20 +287,20 @@ MachoView::MachoView(const string& typeName, BinaryView* data, bool parseOnly): 
 	BinaryReader reader(data);
 	reader.SetEndianness(m_endian);
 	reader.SetVirtualBase(m_universalImageOffset);
-	reader.Seek(m_loadCommandOffset);
+	reader.Seek(m_header.loadCommandOffset);
 
-	m_objectFile = m_ident.filetype == MH_OBJECT;
-	m_dylibFile = m_ident.filetype == MH_DYLIB;
-	m_relocatable = ((m_ident.flags & MH_PIE) > 0) || m_objectFile || m_dylibFile;
-	m_archId = m_ident.cputype;
-	m_addressSize = (m_ident.cputype & MachOABIMask) == MachOABI64 ? 8 : 4;
+	m_objectFile = m_header.ident.filetype == MH_OBJECT;
+	m_dylibFile = m_header.ident.filetype == MH_DYLIB;
+	m_relocatable = ((m_header.ident.flags & MH_PIE) > 0) || m_objectFile || m_dylibFile;
+	m_archId = m_header.ident.cputype;
+	m_addressSize = (m_header.ident.cputype & MachOABIMask) == MachOABI64 ? 8 : 4;
 
 	bool first = true;
 	// Parse segment commands
 	try
 	{
-		m_logger->LogDebug("ident.ncmds: %d\n", m_ident.ncmds);
-		for (size_t i = 0; i < m_ident.ncmds; i++)
+		m_logger->LogDebug("ident.ncmds: %d\n", m_header.ident.ncmds);
+		for (size_t i = 0; i < m_header.ident.ncmds; i++)
 		{
 			load_command load;
 			segment_command_64 segment64;
@@ -322,7 +320,7 @@ MachoView::MachoView(const string& typeName, BinaryView* data, bool parseOnly): 
 				{
 					uint64_t entryPoint = reader.Read64();
 					m_logger->LogDebug("LC_MAIN entryPoint: %#016" PRIx64, entryPoint);
-					entryPoints.push_back({entryPoint, true});
+					m_header.entryPoints.push_back({entryPoint, true});
 					(void)reader.Read64(); // Stack start
 					break;
 				}
@@ -340,10 +338,10 @@ MachoView::MachoView(const string& typeName, BinaryView* data, bool parseOnly): 
 					segment64.flags = reader.Read32();
 					if (first)
 					{
-						if (!((m_ident.flags & MH_SPLIT_SEGS) || m_ident.cputype == MACHO_CPU_TYPE_X86_64)
+						if (!((m_header.ident.flags & MH_SPLIT_SEGS) || m_header.ident.cputype == MACHO_CPU_TYPE_X86_64)
 						  || (segment64.flags & MACHO_VM_PROT_WRITE))
 						{
-							m_relocationBase = segment64.vmaddr;
+							m_header.relocationBase = segment64.vmaddr;
 							first = false;
 						}
 					}
@@ -382,7 +380,7 @@ MachoView::MachoView(const string& typeName, BinaryView* data, bool parseOnly): 
 						sect.reserved2 = reader.Read32();
 						// if the segment isn't mapped into virtual memory don't add the corresponding sections.
 						if (segment64.vmsize > 0)
-							m_sections.push_back(sect);
+							m_header.sections.push_back(sect);
 						else
 							m_logger->LogInfo("Omitting section %16s at %#" PRIx64 " corresponding to segment %16s which is not mapped into memory", (char*)&sect.sectname, sect.addr, (char*)&sect.segname);
 
@@ -410,15 +408,15 @@ MachoView::MachoView(const string& typeName, BinaryView* data, bool parseOnly): 
 								sect.reserved1,
 								sect.reserved2);
 						if (!strncmp(sect.sectname, "__mod_init_func", 15))
-							m_moduleInitSections.push_back(sect);
+							m_header.moduleInitSections.push_back(sect);
 						if ((sect.flags & (S_ATTR_SELF_MODIFYING_CODE | S_SYMBOL_STUBS)) == (S_ATTR_SELF_MODIFYING_CODE | S_SYMBOL_STUBS))
-							m_symbolStubSections.push_back(sect);
+							m_header.symbolStubSections.push_back(sect);
 						if ((sect.flags & S_NON_LAZY_SYMBOL_POINTERS) == S_NON_LAZY_SYMBOL_POINTERS)
-							m_symbolPointerSections.push_back(sect);
+							m_header.symbolPointerSections.push_back(sect);
 						if ((sect.flags & S_LAZY_SYMBOL_POINTERS) == S_LAZY_SYMBOL_POINTERS)
-							m_symbolPointerSections.push_back(sect);
+							m_header.symbolPointerSections.push_back(sect);
 					}
-					m_segments.push_back(segment64);
+					m_header.segments.push_back(segment64);
 					break;
 				case LC_SEGMENT_64:
 					m_logger->LogDebug("LC_SEGMENT_64\n");
@@ -434,10 +432,10 @@ MachoView::MachoView(const string& typeName, BinaryView* data, bool parseOnly): 
 					segment64.flags = reader.Read32();
 					if (first)
 					{
-						if (!((m_ident.flags & MH_SPLIT_SEGS) || m_ident.cputype == MACHO_CPU_TYPE_X86_64)
+						if (!((m_header.ident.flags & MH_SPLIT_SEGS) || m_header.ident.cputype == MACHO_CPU_TYPE_X86_64)
 						  || (segment64.flags & MACHO_VM_PROT_WRITE))
 						{
-							m_relocationBase = segment64.vmaddr;
+							m_header.relocationBase = segment64.vmaddr;
 							first = false;
 						}
 					}
@@ -479,7 +477,7 @@ MachoView::MachoView(const string& typeName, BinaryView* data, bool parseOnly): 
 						sect.reserved3 = reader.Read32();
 						// if the segment isn't mapped into virtual memory don't add the corresponding sections.
 						if (segment64.vmsize > 0)
-							m_sections.push_back(sect);
+							m_header.sections.push_back(sect);
 						else
 							m_logger->LogInfo("Omitting section %16s at %#" PRIx64 " corresponding to segment %16s which is not mapped into memory", (char*)&sect.sectname, sect.addr, (char*)&sect.segname);
 						m_logger->LogDebug(
@@ -509,154 +507,154 @@ MachoView::MachoView(const string& typeName, BinaryView* data, bool parseOnly): 
 								sect.reserved2,
 								sect.reserved3);
 						if (!strncmp(sect.sectname, "__mod_init_func", 15))
-							m_moduleInitSections.push_back(sect);
+							m_header.moduleInitSections.push_back(sect);
 						if ((sect.flags & (S_ATTR_SELF_MODIFYING_CODE | S_SYMBOL_STUBS)) == (S_ATTR_SELF_MODIFYING_CODE | S_SYMBOL_STUBS))
-							m_symbolStubSections.push_back(sect);
+							m_header.symbolStubSections.push_back(sect);
 						if ((sect.flags & S_NON_LAZY_SYMBOL_POINTERS) == S_NON_LAZY_SYMBOL_POINTERS)
-							m_symbolPointerSections.push_back(sect);
+							m_header.symbolPointerSections.push_back(sect);
 						if ((sect.flags & S_LAZY_SYMBOL_POINTERS) == S_LAZY_SYMBOL_POINTERS)
-							m_symbolPointerSections.push_back(sect);
+							m_header.symbolPointerSections.push_back(sect);
 					}
-					m_segments.push_back(segment64);
+					m_header.segments.push_back(segment64);
 					break;
 				case LC_ROUTINES: //map the 32bit version to 64bits
 					m_logger->LogDebug("LC_REOUTINES\n");
-					m_routines64.cmd = LC_ROUTINES_64;
-					m_routines64.init_address = reader.Read32();
-					m_routines64.init_module = reader.Read32();
-					m_routines64.reserved1 = reader.Read32();
-					m_routines64.reserved2 = reader.Read32();
-					m_routines64.reserved3 = reader.Read32();
-					m_routines64.reserved4 = reader.Read32();
-					m_routines64.reserved5 = reader.Read32();
-					m_routines64.reserved6 = reader.Read32();
-					m_routinesPresent = true;
+					m_header.routines64.cmd = LC_ROUTINES_64;
+					m_header.routines64.init_address = reader.Read32();
+					m_header.routines64.init_module = reader.Read32();
+					m_header.routines64.reserved1 = reader.Read32();
+					m_header.routines64.reserved2 = reader.Read32();
+					m_header.routines64.reserved3 = reader.Read32();
+					m_header.routines64.reserved4 = reader.Read32();
+					m_header.routines64.reserved5 = reader.Read32();
+					m_header.routines64.reserved6 = reader.Read32();
+					m_header.routinesPresent = true;
 					m_logger->LogDebug("\tinit_address: %016" PRIx64 "\n\tinit_module: %08" PRIx64 "\n",
-							m_routines64.init_address, m_routines64.init_module);
+							m_header.routines64.init_address, m_header.routines64.init_module);
 					break;
 				case LC_ROUTINES_64:
 					m_logger->LogDebug("LC_REOUTINES_64\n");
-					m_routines64.cmd = LC_ROUTINES_64;
-					m_routines64.init_address = reader.Read64();
-					m_routines64.init_module = reader.Read64();
-					m_routines64.reserved1 = reader.Read64();
-					m_routines64.reserved2 = reader.Read64();
-					m_routines64.reserved3 = reader.Read64();
-					m_routines64.reserved4 = reader.Read64();
-					m_routines64.reserved5 = reader.Read64();
-					m_routines64.reserved6 = reader.Read64();
-					m_routinesPresent = true;
+					m_header.routines64.cmd = LC_ROUTINES_64;
+					m_header.routines64.init_address = reader.Read64();
+					m_header.routines64.init_module = reader.Read64();
+					m_header.routines64.reserved1 = reader.Read64();
+					m_header.routines64.reserved2 = reader.Read64();
+					m_header.routines64.reserved3 = reader.Read64();
+					m_header.routines64.reserved4 = reader.Read64();
+					m_header.routines64.reserved5 = reader.Read64();
+					m_header.routines64.reserved6 = reader.Read64();
+					m_header.routinesPresent = true;
 					m_logger->LogDebug("\tinit_address: %016" PRIx64 "\n\tinit_module: %08" PRIx64 "\n",
-							m_routines64.init_address, m_routines64.init_module);
+							m_header.routines64.init_address, m_header.routines64.init_module);
 					break;
 				case LC_FUNCTION_STARTS:
 					m_logger->LogDebug("LC_FUNCTION_STARTS\n");
-					m_functionStarts.funcoff = reader.Read32();
-					m_functionStarts.funcsize = reader.Read32();
-					m_functionStartsPresent = true;
+					m_header.functionStarts.funcoff = reader.Read32();
+					m_header.functionStarts.funcsize = reader.Read32();
+					m_header.functionStartsPresent = true;
 					m_logger->LogDebug("\tFunction Starts:\n\toffset: %#08" PRIx32 "\n\tsize: %#08" PRIx32 "\n",
-							m_functionStarts.funcoff, m_functionStarts.funcsize);
+							m_header.functionStarts.funcoff, m_header.functionStarts.funcsize);
 					break;
 				case LC_SYMTAB:
 					m_logger->LogDebug("LC_SYMTAB\n");
-					m_symtab.symoff  = reader.Read32();
-					m_symtab.nsyms   = reader.Read32();
-					m_symtab.stroff  = reader.Read32();
-					m_symtab.strsize = reader.Read32();
-					reader.Seek(m_symtab.stroff);
-					m_stringList = reader.Read(m_symtab.strsize);
-					m_stringListSize = m_symtab.strsize;
+					m_header.symtab.symoff  = reader.Read32();
+					m_header.symtab.nsyms   = reader.Read32();
+					m_header.symtab.stroff  = reader.Read32();
+					m_header.symtab.strsize = reader.Read32();
+					reader.Seek(m_header.symtab.stroff);
+					m_header.stringList->Append(reader.Read(m_header.symtab.strsize));
+					m_header.stringListSize = m_header.symtab.strsize;
 					m_logger->LogDebug("\tstrsize: %08x\n" \
 							"\tstroff: %08x\n" \
 							"\tnsyms: %08x\n",
-							m_symtab.strsize,
-							m_symtab.stroff,
-							m_symtab.nsyms);
+							m_header.symtab.strsize,
+							m_header.symtab.stroff,
+							m_header.symtab.nsyms);
 					break;
 				case LC_DYSYMTAB:
 					m_logger->LogDebug("LC_DYSYMTAB\n");
-					m_dysymtab.ilocalsym = reader.Read32();
-					m_dysymtab.nlocalsym = reader.Read32();
-					m_dysymtab.iextdefsym = reader.Read32();
-					m_dysymtab.nextdefsym = reader.Read32();
-					m_dysymtab.iundefsym = reader.Read32();
-					m_dysymtab.nundefsym = reader.Read32();
-					m_dysymtab.tocoff = reader.Read32();
-					m_dysymtab.ntoc = reader.Read32();
-					m_dysymtab.modtaboff = reader.Read32();
-					m_dysymtab.nmodtab = reader.Read32();
-					m_dysymtab.extrefsymoff = reader.Read32();
-					m_dysymtab.nextrefsyms = reader.Read32();
-					m_dysymtab.indirectsymoff = reader.Read32();
-					m_dysymtab.nindirectsyms = reader.Read32();
-					m_dysymtab.extreloff = reader.Read32();
-					m_dysymtab.nextrel = reader.Read32();
-					m_dysymtab.locreloff = reader.Read32();
-					m_dysymtab.nlocrel = reader.Read32();
-					m_logger->LogDebug("\tm_dysymtab.ilocalsym      0x%08x\n"\
-					         "\tm_dysymtab.nlocalsym      0x%08x\n"\
-					         "\tm_dysymtab.iextdefsym     0x%08x\n"\
-					         "\tm_dysymtab.nextdefsym     0x%08x\n"\
-					         "\tm_dysymtab.iundefsym      0x%08x\n"\
-					         "\tm_dysymtab.nundefsym      0x%08x\n"\
-					         "\tm_dysymtab.tocoff         0x%08x\n"\
-					         "\tm_dysymtab.ntoc           0x%08x\n"\
-					         "\tm_dysymtab.modtaboff      0x%08x\n"\
-					         "\tm_dysymtab.nmodtab        0x%08x\n"\
-					         "\tm_dysymtab.extrefsymoff   0x%08x\n"\
-					         "\tm_dysymtab.nextrefsyms    0x%08x\n"\
-					         "\tm_dysymtab.indirectsymoff 0x%08x\n"\
-					         "\tm_dysymtab.nindirectsyms  0x%08x\n"\
-					         "\tm_dysymtab.extreloff      0x%08x\n"\
-					         "\tm_dysymtab.nextrel        0x%08x\n"\
-					         "\tm_dysymtab.locreloff      0x%08x\n"\
-					         "\tm_dysymtab.nlocrel        0x%08x\n",
-					         m_dysymtab.ilocalsym,
-					         m_dysymtab.nlocalsym,
-					         m_dysymtab.iextdefsym,
-					         m_dysymtab.nextdefsym,
-					         m_dysymtab.iundefsym,
-					         m_dysymtab.nundefsym,
-					         m_dysymtab.tocoff,
-					         m_dysymtab.ntoc,
-					         m_dysymtab.modtaboff,
-					         m_dysymtab.nmodtab,
-					         m_dysymtab.extrefsymoff,
-					         m_dysymtab.nextrefsyms,
-					         m_dysymtab.indirectsymoff,
-					         m_dysymtab.nindirectsyms,
-					         m_dysymtab.extreloff,
-					         m_dysymtab.nextrel,
-					         m_dysymtab.locreloff,
-					         m_dysymtab.nlocrel);
-					m_dysymPresent = true;
+					m_header.dysymtab.ilocalsym = reader.Read32();
+					m_header.dysymtab.nlocalsym = reader.Read32();
+					m_header.dysymtab.iextdefsym = reader.Read32();
+					m_header.dysymtab.nextdefsym = reader.Read32();
+					m_header.dysymtab.iundefsym = reader.Read32();
+					m_header.dysymtab.nundefsym = reader.Read32();
+					m_header.dysymtab.tocoff = reader.Read32();
+					m_header.dysymtab.ntoc = reader.Read32();
+					m_header.dysymtab.modtaboff = reader.Read32();
+					m_header.dysymtab.nmodtab = reader.Read32();
+					m_header.dysymtab.extrefsymoff = reader.Read32();
+					m_header.dysymtab.nextrefsyms = reader.Read32();
+					m_header.dysymtab.indirectsymoff = reader.Read32();
+					m_header.dysymtab.nindirectsyms = reader.Read32();
+					m_header.dysymtab.extreloff = reader.Read32();
+					m_header.dysymtab.nextrel = reader.Read32();
+					m_header.dysymtab.locreloff = reader.Read32();
+					m_header.dysymtab.nlocrel = reader.Read32();
+					m_logger->LogDebug("\tm_header.dysymtab.ilocalsym      0x%08x\n"\
+					         "\tm_header.dysymtab.nlocalsym      0x%08x\n"\
+					         "\tm_header.dysymtab.iextdefsym     0x%08x\n"\
+					         "\tm_header.dysymtab.nextdefsym     0x%08x\n"\
+					         "\tm_header.dysymtab.iundefsym      0x%08x\n"\
+					         "\tm_header.dysymtab.nundefsym      0x%08x\n"\
+					         "\tm_header.dysymtab.tocoff         0x%08x\n"\
+					         "\tm_header.dysymtab.ntoc           0x%08x\n"\
+					         "\tm_header.dysymtab.modtaboff      0x%08x\n"\
+					         "\tm_header.dysymtab.nmodtab        0x%08x\n"\
+					         "\tm_header.dysymtab.extrefsymoff   0x%08x\n"\
+					         "\tm_header.dysymtab.nextrefsyms    0x%08x\n"\
+					         "\tm_header.dysymtab.indirectsymoff 0x%08x\n"\
+					         "\tm_header.dysymtab.nindirectsyms  0x%08x\n"\
+					         "\tm_header.dysymtab.extreloff      0x%08x\n"\
+					         "\tm_header.dysymtab.nextrel        0x%08x\n"\
+					         "\tm_header.dysymtab.locreloff      0x%08x\n"\
+					         "\tm_header.dysymtab.nlocrel        0x%08x\n",
+					         m_header.dysymtab.ilocalsym,
+					         m_header.dysymtab.nlocalsym,
+					         m_header.dysymtab.iextdefsym,
+					         m_header.dysymtab.nextdefsym,
+					         m_header.dysymtab.iundefsym,
+					         m_header.dysymtab.nundefsym,
+					         m_header.dysymtab.tocoff,
+					         m_header.dysymtab.ntoc,
+					         m_header.dysymtab.modtaboff,
+					         m_header.dysymtab.nmodtab,
+					         m_header.dysymtab.extrefsymoff,
+					         m_header.dysymtab.nextrefsyms,
+					         m_header.dysymtab.indirectsymoff,
+					         m_header.dysymtab.nindirectsyms,
+					         m_header.dysymtab.extreloff,
+					         m_header.dysymtab.nextrel,
+					         m_header.dysymtab.locreloff,
+					         m_header.dysymtab.nlocrel);
+					m_header.dysymPresent = true;
 					break;
 				case LC_DYLD_CHAINED_FIXUPS:
 					m_logger->LogDebug("LC_DYLD_CHAINED_FIXUPS\n");
-					m_chainedFixups.dataoff = reader.Read32();
-					m_chainedFixups.datasize = reader.Read32();
+					m_header.chainedFixups.dataoff = reader.Read32();
+					m_header.chainedFixups.datasize = reader.Read32();
 					break;
 				case LC_DYLD_INFO:
 				case LC_DYLD_INFO_ONLY:
 					m_logger->LogDebug("LC_DYLD_INFO\n");
-					m_dyldInfo.rebase_off = reader.Read32();
-					m_dyldInfo.rebase_size = reader.Read32();
-					m_dyldInfo.bind_off = reader.Read32();
-					m_dyldInfo.bind_size = reader.Read32();
-					m_dyldInfo.weak_bind_off = reader.Read32();
-					m_dyldInfo.weak_bind_size = reader.Read32();
-					m_dyldInfo.lazy_bind_off = reader.Read32();
-					m_dyldInfo.lazy_bind_size = reader.Read32();
-					m_dyldInfo.export_off = reader.Read32();
-					m_dyldInfo.export_size = reader.Read32();
-					m_exportTrie.dataoff = m_dyldInfo.export_off;
-					m_exportTrie.datasize = m_dyldInfo.export_size;
-					m_dyldInfoPresent = true;
+					m_header.dyldInfo.rebase_off = reader.Read32();
+					m_header.dyldInfo.rebase_size = reader.Read32();
+					m_header.dyldInfo.bind_off = reader.Read32();
+					m_header.dyldInfo.bind_size = reader.Read32();
+					m_header.dyldInfo.weak_bind_off = reader.Read32();
+					m_header.dyldInfo.weak_bind_size = reader.Read32();
+					m_header.dyldInfo.lazy_bind_off = reader.Read32();
+					m_header.dyldInfo.lazy_bind_size = reader.Read32();
+					m_header.dyldInfo.export_off = reader.Read32();
+					m_header.dyldInfo.export_size = reader.Read32();
+					m_header.exportTrie.dataoff = m_header.dyldInfo.export_off;
+					m_header.exportTrie.datasize = m_header.dyldInfo.export_size;
+					m_header.dyldInfoPresent = true;
 					break;
 				case LC_DYLD_EXPORTS_TRIE:
 					m_logger->LogDebug("LC_DYLD_EXPORTS_TRIE\n");
-					m_exportTrie.dataoff = reader.Read32();
-					m_exportTrie.datasize = reader.Read32();
+					m_header.exportTrie.dataoff = reader.Read32();
+					m_header.exportTrie.datasize = reader.Read32();
 					break;
 				case LC_THREAD:
 				case LC_UNIXTHREAD:
@@ -677,7 +675,7 @@ MachoView::MachoView(const string& typeName, BinaryView* data, bool parseOnly): 
 							}
 							//This wont be big endian so we can just read the whole thing
 							reader.Read(&thread.statex64, sizeof(thread.statex64));
-							entryPoints.push_back({thread.statex64.rip, false});
+							m_header.entryPoints.push_back({thread.statex64.rip, false});
 							break;
 						case MachOx86:
 							m_logger->LogDebug("x86 Thread state\n");
@@ -688,7 +686,7 @@ MachoView::MachoView(const string& typeName, BinaryView* data, bool parseOnly): 
 							}
 							//This wont be big endian so we can just read the whole thing
 							reader.Read(&thread.statex86, sizeof(thread.statex86));
-							entryPoints.push_back({thread.statex86.eip, false});
+							m_header.entryPoints.push_back({thread.statex86.eip, false});
 							break;
 						case MachOArm:
 							m_logger->LogDebug("Arm Thread state\n");
@@ -699,7 +697,7 @@ MachoView::MachoView(const string& typeName, BinaryView* data, bool parseOnly): 
 							}
 							//This wont be big endian so we can just read the whole thing
 							reader.Read(&thread.statearmv7, sizeof(thread.statearmv7));
-							entryPoints.push_back({thread.statearmv7.r15, false});
+							m_header.entryPoints.push_back({thread.statearmv7.r15, false});
 							break;
 						case MachOAarch64:
 						case MachOAarch6432:
@@ -710,7 +708,7 @@ MachoView::MachoView(const string& typeName, BinaryView* data, bool parseOnly): 
 								break;
 							}
 							reader.Read(&thread.stateaarch64, sizeof(thread.stateaarch64));
-							entryPoints.push_back({thread.stateaarch64.pc, false});
+							m_header.entryPoints.push_back({thread.stateaarch64.pc, false});
 							break;
 						case MachOPPC:
 							m_logger->LogDebug("PPC Thread state\n");
@@ -720,7 +718,7 @@ MachoView::MachoView(const string& typeName, BinaryView* data, bool parseOnly): 
 								break;
 							}
 							//Read individual entries for endian reasons
-							entryPoints.push_back({reader.Read32(), false});
+							m_header.entryPoints.push_back({reader.Read32(), false});
 							(void)reader.Read32();
 							(void)reader.Read32();
 							//Read the rest of the structure
@@ -733,7 +731,7 @@ MachoView::MachoView(const string& typeName, BinaryView* data, bool parseOnly): 
 								reader.SeekRelative(thread.count * sizeof(uint32_t));
 								break;
 							}
-							entryPoints.push_back({reader.Read64(), false});
+							m_header.entryPoints.push_back({reader.Read64(), false});
 							(void)reader.Read64();
 							(void)reader.Read64(); // Stack start
 							(void)reader.Read(&thread.stateppc64.r1, sizeof(thread.stateppc64) - (3 * 8));
@@ -750,25 +748,25 @@ MachoView::MachoView(const string& typeName, BinaryView* data, bool parseOnly): 
 						{
 							reader.Seek(curOffset + offset);
 							string libname = reader.ReadCString();
-							m_dylibs.push_back(libname);
+							m_header.dylibs.push_back(libname);
 						}
 					}
 					break;
 				case LC_BUILD_VERSION:
 				{
 					m_logger->LogDebug("LC_BUILD_VERSION:");
-					m_buildVersion.platform = reader.Read32();
-					m_buildVersion.minos = reader.Read32();
-					m_buildVersion.sdk = reader.Read32();
-					m_buildVersion.ntools = reader.Read32();
-					m_logger->LogDebug("Platform: %s", BuildPlatformToString(m_buildVersion.platform).c_str());
-					m_logger->LogDebug("MinOS: %s", BuildToolVersionToString(m_buildVersion.minos).c_str());
-					m_logger->LogDebug("SDK: %s", BuildToolVersionToString(m_buildVersion.sdk).c_str());
-					for (uint32_t i = 0; (i < m_buildVersion.ntools) && (i < 10); i++)
+					m_header.buildVersion.platform = reader.Read32();
+					m_header.buildVersion.minos = reader.Read32();
+					m_header.buildVersion.sdk = reader.Read32();
+					m_header.buildVersion.ntools = reader.Read32();
+					m_logger->LogDebug("Platform: %s", BuildPlatformToString(m_header.buildVersion.platform).c_str());
+					m_logger->LogDebug("MinOS: %s", BuildToolVersionToString(m_header.buildVersion.minos).c_str());
+					m_logger->LogDebug("SDK: %s", BuildToolVersionToString(m_header.buildVersion.sdk).c_str());
+					for (uint32_t i = 0; (i < m_header.buildVersion.ntools) && (i < 10); i++)
 					{
 						uint32_t tool = reader.Read32();
 						uint32_t version = reader.Read32();
-						m_buildToolVersions.push_back({tool, version});
+						m_header.buildToolVersions.push_back({tool, version});
 						m_logger->LogDebug("Build Tool: %s: %s", BuildToolToString(tool).c_str(), BuildToolVersionToString(version).c_str());
 					}
 					break;
@@ -924,7 +922,7 @@ bool MachoView::IsValidFunctionStart(uint64_t addr)
 
 void MachoView::ParseFunctionStarts(Platform* platform)
 {
-	if (m_functionStartsPresent == false)
+	if (m_header.functionStartsPresent == false)
 		return;
 
 	BinaryReader reader(GetParentView());
@@ -932,15 +930,15 @@ void MachoView::ParseFunctionStarts(Platform* platform)
 	reader.SetVirtualBase(m_universalImageOffset);
 	try
 	{
-		reader.Seek(m_functionStarts.funcoff);
-		DataBuffer buffer = reader.Read(m_functionStarts.funcsize);
+		reader.Seek(m_header.functionStarts.funcoff);
+		DataBuffer buffer = reader.Read(m_header.functionStarts.funcsize);
 		size_t i = 0;
-		uint64_t curfunc = m_textBase;
+		uint64_t curfunc = m_header.textBase;
 		uint64_t curOffset = 0;
 
-		while (i < m_functionStarts.funcsize)
+		while (i < m_header.functionStarts.funcsize)
 		{
-			curOffset = readLEB128(buffer, m_functionStarts.funcsize, i);
+			curOffset = readLEB128(buffer, m_header.functionStarts.funcsize, i);
 			if (curOffset == 0)
 				continue;
 			curfunc += curOffset;
@@ -1028,7 +1026,7 @@ bool MachoView::Init()
 	uint64_t initialImageBase = 0;
 	bool initialImageBaseSet = false;
 	string preferredImageBaseDesc;
-	for (const auto& i : m_segments)
+	for (const auto& i : m_header.segments)
 	{
 		if ((i.initprot == MACHO_VM_PROT_NONE) || (!i.vmsize))
 			continue;
@@ -1065,25 +1063,25 @@ bool MachoView::Init()
 	else
 		m_imageBaseAdjustment = -(int64_t)(initialImageBase - preferredImageBase);
 
-	for (auto& i : m_segments)
+	for (auto& i : m_header.segments)
 		i.vmaddr += m_imageBaseAdjustment;
 
-	for (auto& i : m_sections)
+	for (auto& i : m_header.sections)
 		i.addr += m_imageBaseAdjustment;
 
-	for (auto& i : m_symbolStubSections)
+	for (auto& i : m_header.symbolStubSections)
 		i.addr += m_imageBaseAdjustment;
 
-	for (auto& i : m_symbolPointerSections)
+	for (auto& i : m_header.symbolPointerSections)
 		i.addr += m_imageBaseAdjustment;
 
-	for (auto& entryPoint : entryPoints)
+	for (auto& entryPoint : m_header.entryPoints)
 		entryPoint.first += (entryPoint.second ? 0 : m_imageBaseAdjustment);
 
-	if (m_routinesPresent)
-		m_routines64.init_address += m_imageBaseAdjustment;
+	if (m_header.routinesPresent)
+		m_header.routines64.init_address += m_imageBaseAdjustment;
 
-	for (auto& segment : m_segments)
+	for (auto& segment : m_header.segments)
 	{
 		if ((segment.initprot == MACHO_VM_PROT_NONE) || (!segment.vmsize))
 			continue;
@@ -1091,17 +1089,17 @@ bool MachoView::Init()
 		if ((segment.initprot & MACHO_VM_PROT_EXECUTE) == MACHO_VM_PROT_EXECUTE)
 		{
 			if ((segment.fileoff == (0 + m_universalImageOffset)) && (segment.filesize != 0))
-				m_textBase = segment.vmaddr;
-			for (auto& entryPoint : entryPoints)
+				m_header.textBase = segment.vmaddr;
+			for (auto& entryPoint : m_header.entryPoints)
 			{
-				uint64_t val = entryPoint.first + (entryPoint.second ? m_textBase : 0);
-				if (find(m_entryPoints.begin(), m_entryPoints.end(), val) == m_entryPoints.end())
-					m_entryPoints.push_back(val);
+				uint64_t val = entryPoint.first + (entryPoint.second ? m_header.textBase : 0);
+				if (find(m_header.m_entryPoints.begin(), m_header.m_entryPoints.end(), val) == m_header.m_entryPoints.end())
+					m_header.m_entryPoints.push_back(val);
 			}
 		}
 	}
 
-	for (auto& segment : m_segments)
+	for (auto& segment : m_header.segments)
 	{
 		if ((segment.initprot == MACHO_VM_PROT_NONE) || (!segment.vmsize))
 			continue;
@@ -1120,39 +1118,39 @@ bool MachoView::Init()
 
 		// if we're positive we have an entry point for some reason, force the segment
 		// executable. this helps with kernel images.
-		for (auto& entryPoint : m_entryPoints)
+		for (auto& entryPoint : m_header.m_entryPoints)
 			if (segment.vmaddr <= entryPoint && (entryPoint < (segment.vmaddr + segment.filesize)))
 				flags |= SegmentExecutable;
 
 		AddAutoSegment(segment.vmaddr, segment.vmsize, segment.fileoff, segment.filesize, flags);
 	}
 
-	for (auto& section : m_sections)
+	for (auto& section : m_header.sections)
 	{
 		char sectionName[17];
 		memcpy(sectionName, section.sectname, sizeof(section.sectname));
 		sectionName[16] = 0;
-		m_sectionNames.push_back(sectionName);
+		m_header.sectionNames.push_back(sectionName);
 	}
 
-	m_sectionNames = GetUniqueSectionNames(m_sectionNames);
+	m_header.sectionNames = GetUniqueSectionNames(m_header.sectionNames);
 
-	for (size_t i = 0; i < m_sections.size(); i++)
+	for (size_t i = 0; i < m_header.sections.size(); i++)
 	{
-		if (!m_sections[i].size)
+		if (!m_header.sections[i].size)
 			continue;
 
 		string type;
 		BNSectionSemantics semantics = DefaultSectionSemantics;
-		switch (m_sections[i].flags & 0xff)
+		switch (m_header.sections[i].flags & 0xff)
 		{
 		case S_REGULAR:
-			if (m_sections[i].flags & S_ATTR_PURE_INSTRUCTIONS)
+			if (m_header.sections[i].flags & S_ATTR_PURE_INSTRUCTIONS)
 			{
 				type = "PURE_CODE";
 				semantics = ReadOnlyCodeSectionSemantics;
 			}
-			else if (m_sections[i].flags & S_ATTR_SOME_INSTRUCTIONS)
+			else if (m_header.sections[i].flags & S_ATTR_SOME_INSTRUCTIONS)
 			{
 				type = "CODE";
 				semantics = ReadOnlyCodeSectionSemantics;
@@ -1239,18 +1237,18 @@ bool MachoView::Init()
 			type = "UNKNOWN";
 			break;
 		}
-		if (i >= m_sectionNames.size())
+		if (i >= m_header.sectionNames.size())
 			break;
-		if (strncmp(m_sections[i].sectname, "__text", sizeof(m_sections[i].sectname)) == 0)
+		if (strncmp(m_header.sections[i].sectname, "__text", sizeof(m_header.sections[i].sectname)) == 0)
 			semantics = ReadOnlyCodeSectionSemantics;
-		if (strncmp(m_sections[i].sectname, "__const", sizeof(m_sections[i].sectname)) == 0)
+		if (strncmp(m_header.sections[i].sectname, "__const", sizeof(m_header.sections[i].sectname)) == 0)
 			semantics = ReadOnlyDataSectionSemantics;
-		if (strncmp(m_sections[i].sectname, "__data", sizeof(m_sections[i].sectname)) == 0)
+		if (strncmp(m_header.sections[i].sectname, "__data", sizeof(m_header.sections[i].sectname)) == 0)
 			semantics = ReadWriteDataSectionSemantics;
-		if (strncmp(m_sections[i].segname, "__DATA_CONST", sizeof(m_sections[i].segname)) == 0)
+		if (strncmp(m_header.sections[i].segname, "__DATA_CONST", sizeof(m_header.sections[i].segname)) == 0)
 			semantics = ReadOnlyDataSectionSemantics;
 
-		AddAutoSection(m_sectionNames[i], m_sections[i].addr, m_sections[i].size, semantics, type, m_sections[i].align);
+		AddAutoSection(m_header.sectionNames[i], m_header.sections[i].addr, m_header.sections[i].size, semantics, type, m_header.sections[i].align);
 	}
 
 	// Validate architecture
@@ -1275,8 +1273,8 @@ bool MachoView::Init()
 	if (!platform)
 		platform = m_arch->GetStandalonePlatform();
 
-	if (m_entryPoints.size() > 0)
-		platform = platform->GetAssociatedPlatformByAddress(m_entryPoints[0]);
+	if (m_header.m_entryPoints.size() > 0)
+		platform = platform->GetAssociatedPlatformByAddress(m_header.m_entryPoints[0]);
 
 	if (settings && settings->Contains("loader.platform")) // handle overrides
 	{
@@ -1316,7 +1314,7 @@ bool MachoView::Init()
 
 	vector<Ref<Metadata>> libraries;
 	vector<Ref<Metadata>> libraryFound;
-	for (auto& l : m_dylibs)
+	for (auto& l : m_header.dylibs)
 	{
 		libraries.push_back(new Metadata(string(l)));
 		Ref<TypeLibrary> typeLib = GetTypeLibrary(l);
@@ -1342,7 +1340,7 @@ bool MachoView::Init()
 	StoreMetadata("LibraryFound", new Metadata(libraryFound), true);
 
 	// Add module Init functions if they exist
-	for (const auto& moduleInitSection : m_moduleInitSections)
+	for (const auto& moduleInitSection : m_header.moduleInitSections)
 	{
 		// ignore mod_init functions that are rebased as part of thread starts
 		if (find(threadStarts.begin(), threadStarts.end(), moduleInitSection.offset) != threadStarts.end())
@@ -1363,7 +1361,7 @@ bool MachoView::Init()
 	}
 
 	bool first = true;
-	for (auto entry : m_entryPoints)
+	for (auto entry : m_header.m_entryPoints)
 	{
 		AddEntryPointForAnalysis(platform, entry);
 		if (first)
@@ -1377,11 +1375,11 @@ bool MachoView::Init()
 	try
 	{
 		// Handle indirect symbols
-		if (m_dysymtab.nindirectsyms)
+		if (m_header.dysymtab.nindirectsyms)
 		{
-			indirectSymbols.resize(m_dysymtab.nindirectsyms);
-			reader.Seek(m_dysymtab.indirectsymoff);
-			reader.Read(&indirectSymbols[0], m_dysymtab.nindirectsyms * sizeof(uint32_t));
+			indirectSymbols.resize(m_header.dysymtab.nindirectsyms);
+			reader.Seek(m_header.dysymtab.indirectsymoff);
+			reader.Read(&indirectSymbols[0], m_header.dysymtab.nindirectsyms * sizeof(uint32_t));
 		}
 	}
 	catch (ReadException&)
@@ -1396,7 +1394,7 @@ bool MachoView::Init()
 	{
 		// Add functions for all function symbols
 		m_logger->LogDebug("Parsing symbol table\n");
-		ParseSymbolTable(reader, m_symtab, indirectSymbols);
+		ParseSymbolTable(reader, m_header.symtab, indirectSymbols);
 	}
 	catch (std::exception&)
 	{
@@ -1427,7 +1425,7 @@ bool MachoView::Init()
 			// For executables the relocations are attached to each of the sections
 			// In libraries these are zeroed out and collected in the dysymtab
 			vector<BNRelocationInfo> infoList;
-			for (auto& section : m_sections)
+			for (auto& section : m_header.sections)
 			{
 				if (section.nreloc == 0)
 					continue;
@@ -1476,14 +1474,14 @@ bool MachoView::Init()
 			infoList.clear();
 
 			// Handle local relocations for dynamic libraries
-			for (size_t i = 0; i < m_dysymtab.nlocrel; i++)
+			for (size_t i = 0; i < m_header.dysymtab.nlocrel; i++)
 			{
 				relocation_info info;
-				reader.Seek(m_dysymtab.locreloff + (i * sizeof(relocation_info)));
+				reader.Seek(m_header.dysymtab.locreloff + (i * sizeof(relocation_info)));
 				reader.Read(&info, sizeof(info));
 				BNRelocationInfo result;
 				memset(&result, 0, sizeof(result));
-				if (ParseRelocationEntry(info, m_relocationBase, result))
+				if (ParseRelocationEntry(info, m_header.relocationBase, result))
 					infoList.push_back(result);
 			}
 
@@ -1512,14 +1510,14 @@ bool MachoView::Init()
 			infoList.clear();
 
 			// Handle external relocations for dynamic libraries
-			for (size_t i = 0; i < m_dysymtab.nextrel; i++)
+			for (size_t i = 0; i < m_header.dysymtab.nextrel; i++)
 			{
 				relocation_info info;
-				reader.Seek(m_dysymtab.extreloff + (i * sizeof(relocation_info)));
+				reader.Seek(m_header.dysymtab.extreloff + (i * sizeof(relocation_info)));
 				reader.Read(&info, sizeof(info));
 				BNRelocationInfo result;
 				memset(&result, 0, sizeof(result));
-				if (ParseRelocationEntry(info, m_relocationBase, result))
+				if (ParseRelocationEntry(info, m_header.relocationBase, result))
 					infoList.push_back(result);
 			}
 
@@ -1951,8 +1949,8 @@ bool MachoView::Init()
 
 	// Apply Mach-O header types
 	vector<std::tuple<uint64_t, string>> machoHeaderStarts;
-	machoHeaderStarts.emplace_back(m_textBase, "");
-	if (m_textBase != preferredImageBase)
+	machoHeaderStarts.emplace_back(m_header.textBase, "");
+	if (m_header.textBase != preferredImageBase)
 		machoHeaderStarts.emplace_back(preferredImageBase, preferredImageBaseDesc);
 
 	for (auto [imageBase, imageDesc] : machoHeaderStarts)
@@ -2085,7 +2083,7 @@ Ref<Symbol> MachoView::DefineMachoSymbol(
 
 		// Ensure symbol is within the executable
 		bool ok = false;
-		for (auto& segment : m_segments)
+		for (auto& segment : m_header.segments)
 		{
 			if ((segment.initprot == MACHO_VM_PROT_NONE) || (!segment.vmsize))
 				continue;
@@ -2172,7 +2170,7 @@ Ref<Symbol> MachoView::DefineMachoSymbol(
 
 bool MachoView::GetSegmentPermissions(uint64_t address, uint32_t &flags)
 {
-	for (auto& segment : m_segments)
+	for (auto& segment : m_header.segments)
 	{
 		if ((segment.initprot == MACHO_VM_PROT_NONE) || (!segment.vmsize))
 			continue;
@@ -2189,7 +2187,7 @@ bool MachoView::GetSegmentPermissions(uint64_t address, uint32_t &flags)
 
 bool MachoView::GetSectionPermissions(uint64_t address, uint32_t &flags)
 {
-	for (auto& section : m_sections)
+	for (auto& section : m_header.sections)
 	{
 		if (!section.size)
 			continue;
@@ -2207,8 +2205,8 @@ bool MachoView::GetSectionPermissions(uint64_t address, uint32_t &flags)
 void MachoView::ParseExportTrie(BinaryReader& reader)
 {
 	try {
-		uint32_t endGuard = m_exportTrie.datasize;
-		DataBuffer buffer = GetParentView()->ReadBuffer(m_universalImageOffset + m_exportTrie.dataoff, m_exportTrie.datasize);
+		uint32_t endGuard = m_header.exportTrie.datasize;
+		DataBuffer buffer = GetParentView()->ReadBuffer(m_universalImageOffset + m_header.exportTrie.dataoff, m_header.exportTrie.datasize);
 
 		std::vector<ExportNode> nodes;
 		ReadExportNode(buffer, nodes, "", 0, endGuard);
@@ -2317,9 +2315,9 @@ void MachoView::ParseDynamicTable(BinaryReader& reader, BNSymbolType incomingTyp
 				case BindOpcodeSetSegmentAndOffsetULEB:
 					segmentIndex = imm;
 					offset = readLEB128(table, tableSize, i);
-					if (segmentIndex >= m_segments.size())
+					if (segmentIndex >= m_header.segments.size())
 						throw MachoFormatException();
-					address = m_segments[segmentIndex].vmaddr + offset;
+					address = m_header.segments[segmentIndex].vmaddr + offset;
 					break;
 				case BindOpcodeAddAddressULEB:
 					address += readLEB128(table, tableSize, i);
@@ -2379,23 +2377,23 @@ void MachoView::ParseSymbolTable(BinaryReader& reader, const symtab_command& sym
 	{
 		//First parse the imports
 		m_logger->LogDebug("Bind symbols");
-		ParseDynamicTable(reader, ImportAddressSymbol, m_dyldInfo.bind_off, m_dyldInfo.bind_size, GlobalBinding);
+		ParseDynamicTable(reader, ImportAddressSymbol, m_header.dyldInfo.bind_off, m_header.dyldInfo.bind_size, GlobalBinding);
 		m_logger->LogDebug("Weak symbols");
-		ParseDynamicTable(reader, ImportAddressSymbol, m_dyldInfo.weak_bind_off, m_dyldInfo.weak_bind_size, WeakBinding);
+		ParseDynamicTable(reader, ImportAddressSymbol, m_header.dyldInfo.weak_bind_off, m_header.dyldInfo.weak_bind_size, WeakBinding);
 		m_logger->LogDebug("Lazy symbols");
-		ParseDynamicTable(reader, ImportAddressSymbol, m_dyldInfo.lazy_bind_off, m_dyldInfo.lazy_bind_size, GlobalBinding);
+		ParseDynamicTable(reader, ImportAddressSymbol, m_header.dyldInfo.lazy_bind_off, m_header.dyldInfo.lazy_bind_size, GlobalBinding);
 		m_logger->LogDebug("Chained Fixups");
 		ParseChainedFixups();
-		if (m_exportTrie.dataoff)
+		if (m_header.exportTrie.dataoff)
 			ParseExportTrie(reader);
 
 		//Then process the symtab
-		if (m_stringListSize == 0)
+		if (m_header.stringListSize == 0)
 			return;
 		reader.Seek(symtab.symoff);
 
 		unordered_map<size_t, vector<std::pair<section_64*, size_t>>> stubSymbols;
-		for (auto& symbolStubs : m_symbolStubSections)
+		for (auto& symbolStubs : m_header.symbolStubSections)
 		{
 			if (!symbolStubs.reserved2)
 				continue;
@@ -2407,7 +2405,7 @@ void MachoView::ParseSymbolTable(BinaryReader& reader, const symtab_command& sym
 				// Apple's source code
 				uint8_t  sectionType  = (symbolStubs.flags & SECTION_TYPE);
 				bool selfModifyingStub = (sectionType == S_SYMBOL_STUBS) && (symbolStubs.flags & S_ATTR_SELF_MODIFYING_CODE) &&
-					(symbolStubs.reserved2 == 5) && (m_ident.cputype == MACHO_CPU_TYPE_X86);
+					(symbolStubs.reserved2 == 5) && (m_header.ident.cputype == MACHO_CPU_TYPE_X86);
 				uint32_t elementSize = selfModifyingStub ? symbolStubs.reserved2 : m_arch->GetAddressSize();
 				auto symNum = indirectSymbols[j + symbolStubs.reserved1];
 				if (symNum == INDIRECT_SYMBOL_ABS)
@@ -2421,13 +2419,13 @@ void MachoView::ParseSymbolTable(BinaryReader& reader, const symtab_command& sym
 		}
 
 		unordered_map<size_t, vector<std::pair<section_64*, size_t>>> pointerSymbols;
-		for (auto& symbolPointerSection : m_symbolPointerSections)
+		for (auto& symbolPointerSection : m_header.symbolPointerSections)
 		{
 			// Not exactly sure what the following 3 variables are for but this is the check done in
 			// Apple's source code
 			uint8_t  sectionType  = (symbolPointerSection.flags & SECTION_TYPE);
 			bool selfModifyingStub = (sectionType == S_SYMBOL_STUBS) && (symbolPointerSection.flags & S_ATTR_SELF_MODIFYING_CODE) &&
-				(symbolPointerSection.reserved2 == 5) && (m_ident.cputype == MACHO_CPU_TYPE_X86);
+				(symbolPointerSection.reserved2 == 5) && (m_header.ident.cputype == MACHO_CPU_TYPE_X86);
 			uint32_t elementSize = selfModifyingStub ? symbolPointerSection.reserved2 : m_arch->GetAddressSize();
 			size_t needed = symbolPointerSection.size / m_addressSize;
 			for (size_t j = 0; (j < needed) && ((j + symbolPointerSection.reserved1) < indirectSymbols.size()); j++)
@@ -2456,7 +2454,7 @@ void MachoView::ParseSymbolTable(BinaryReader& reader, const symtab_command& sym
 			if (sym.n_strx >= symtab.strsize || ((sym.n_type & N_TYPE) == N_INDR))
 				continue;
 
-			string symbol((char*)m_stringList.GetDataAt(sym.n_strx));
+			string symbol((char*)m_header.stringList->GetDataAt(sym.n_strx));
 			m_symbols.push_back(symbol);
 			//otool ignores symbols that end with ".o", startwith "ltmp" or are "gcc_compiled." so do we
 			if (symbol == "gcc_compiled." ||
@@ -2471,7 +2469,7 @@ void MachoView::ParseSymbolTable(BinaryReader& reader, const symtab_command& sym
 			//Very curious to see how other tools handle it.
 			BNSymbolType type = DataSymbol;
 			uint32_t flags;
-			if ((sym.n_type & N_TYPE) == N_SECT && sym.n_sect > 0 && (size_t)(sym.n_sect - 1) < m_sections.size())
+			if ((sym.n_type & N_TYPE) == N_SECT && sym.n_sect > 0 && (size_t)(sym.n_sect - 1) < m_header.sections.size())
 			{
 				if (!GetSectionPermissions(sym.n_value, flags))
 				{
@@ -2522,15 +2520,15 @@ void MachoView::ParseSymbolTable(BinaryReader& reader, const symtab_command& sym
 			bool deferred = stubSymbolIter == stubSymbols.end() && pointerSymbolIter == pointerSymbols.end();
 
 			Ref<Symbol> symbolObj;
-			if(m_dysymtab.nlocalsym && i >= m_dysymtab.ilocalsym && i < m_dysymtab.ilocalsym + m_dysymtab.nlocalsym)
+			if(m_header.dysymtab.nlocalsym && i >= m_header.dysymtab.ilocalsym && i < m_header.dysymtab.ilocalsym + m_header.dysymtab.nlocalsym)
 			{
 				symbolObj = DefineMachoSymbol(type, symbol, sym.n_value, LocalBinding, deferred);
 			}
-			else if (m_dysymtab.nextdefsym && i >= m_dysymtab.iextdefsym && i < m_dysymtab.iextdefsym + m_dysymtab.nextdefsym)
+			else if (m_header.dysymtab.nextdefsym && i >= m_header.dysymtab.iextdefsym && i < m_header.dysymtab.iextdefsym + m_header.dysymtab.nextdefsym)
 			{
 				symbolObj = DefineMachoSymbol(type, symbol, sym.n_value, GlobalBinding, deferred);
 			}
-			else if (m_dysymtab.nundefsym && i >= m_dysymtab.iundefsym && i < m_dysymtab.iundefsym + m_dysymtab.nundefsym)
+			else if (m_header.dysymtab.nundefsym && i >= m_header.dysymtab.iundefsym && i < m_header.dysymtab.iundefsym + m_header.dysymtab.nundefsym)
 			{
 				symbolObj = DefineMachoSymbol(type, symbol, sym.n_value, GlobalBinding, deferred);
 			}
@@ -2581,7 +2579,7 @@ void MachoView::ParseSymbolTable(BinaryReader& reader, const symtab_command& sym
 
 void MachoView::ParseChainedFixups()
 {
-	if (!m_chainedFixups.dataoff)
+	if (!m_header.chainedFixups.dataoff)
 		return;
 
 	m_logger->LogDebug("Processing Chained Fixups");
@@ -2600,7 +2598,7 @@ void MachoView::ParseChainedFixups()
 
 	try {
 		dyld_chained_fixups_header fixupsHeader {};
-		uint64_t fixupHeaderAddress = m_universalImageOffset + m_chainedFixups.dataoff;
+		uint64_t fixupHeaderAddress = m_universalImageOffset + m_header.chainedFixups.dataoff;
 		parentReader.Seek(fixupHeaderAddress);
 		fixupsHeader.fixups_version = parentReader.Read32();
 		fixupsHeader.starts_offset = parentReader.Read32();
@@ -2621,7 +2619,7 @@ void MachoView::ParseChainedFixups()
 			return;
 		}
 
-		if (importTableSize > m_chainedFixups.datasize)
+		if (importTableSize > m_header.chainedFixups.datasize)
 		{
 			m_logger->LogError("Chained Fixup parsing failed. Binary is malformed");
 			return;
@@ -2969,10 +2967,10 @@ void MachoView::ParseChainedFixups()
 
 uint64_t MachoView::PerformGetEntryPoint() const
 {
-	if (m_entryPoints.size() == 0)
+	if (m_header.m_entryPoints.size() == 0)
 		return 0;
 
-	return m_entryPoints[0];
+	return m_header.m_entryPoints[0];
 }
 
 
