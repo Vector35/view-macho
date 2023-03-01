@@ -1232,53 +1232,90 @@ namespace BinaryNinja
 		uint64_t flags;
 	};
 
-	class MachoView: public BinaryView
-	{
-		uint64_t m_universalImageOffset;
-		uint64_t m_loadCommandOffset;
-		bool m_parseOnly, m_backedByDatabase;
+	struct MachOHeader {
+		uint64_t headerOffset;
+
+		uint64_t textBase;
+		uint64_t loadCommandOffset;
+		mach_header_64 ident;
+
 		std::vector<std::pair<uint64_t, bool>> entryPoints;
 		std::vector<uint64_t> m_entryPoints; //list of entrypoints
-		uint64_t m_textBase;     //base of the __TEXT segment
+
+		symtab_command symtab;
+		dysymtab_command dysymtab;
+		dyld_info_command dyldInfo;
+		routines_command_64 routines64;
+		function_starts_command functionStarts;
+		std::vector<section_64> moduleInitSections;
+		linkedit_data_command exportTrie;
+		linkedit_data_command chainedFixups {};
+
+		DataBuffer* stringList;
+		size_t stringListSize;
+
+		uint64_t relocationBase;
+		// Section and program headers, internally use 64-bit form as it is a superset of 32-bit
+		std::vector<segment_command_64> segments; //only three types of sections __TEXT, __DATA, __IMPORT
+		std::vector<section_64> sections;
+		std::vector<std::string> sectionNames;
+
+		std::vector<section_64> symbolStubSections;
+		std::vector<section_64> symbolPointerSections;
+
+		std::vector<std::string> dylibs;
+
+		build_version_command buildVersion;
+		std::vector<build_tool_version> buildToolVersions;
+
+		bool dysymPresent = false;
+		bool dyldInfoPresent = false;
+		bool routinesPresent = false;
+		bool functionStartsPresent = false;
+		bool relocatable = false;
+	};
+
+	class MachoView: public BinaryView
+	{
+		MachOHeader m_header;
+		std::map<uint64_t, MachOHeader> m_subHeaders; // Used for MH_FILESET entries.
+
+		struct HeaderQualifiedNames {
+			QualifiedName cpuTypeEnumQualName;
+			QualifiedName fileTypeEnumQualName;
+			QualifiedName flagsTypeEnumQualName;
+			QualifiedName headerQualName;
+			QualifiedName cmdTypeEnumQualName;
+			QualifiedName loadCommandQualName;
+			QualifiedName protTypeEnumQualName;
+			QualifiedName segFlagsTypeEnumQualName;
+			QualifiedName loadSegmentCommandQualName;
+			QualifiedName loadSegment64CommandQualName;
+			QualifiedName sectionQualName;
+			QualifiedName section64QualName;
+			QualifiedName symtabQualName;
+			QualifiedName dynsymtabQualName;
+			QualifiedName uuidQualName;
+			QualifiedName linkeditDataQualName;
+			QualifiedName encryptionInfoQualName;
+			QualifiedName versionMinQualName;
+			QualifiedName dyldInfoQualName;
+			QualifiedName dylibQualName;
+			QualifiedName dylibCommandQualName;
+		} m_typeNames;
+
+		uint64_t m_universalImageOffset;
+		bool m_parseOnly, m_backedByDatabase;
 		int64_t m_imageBaseAdjustment;
 		size_t m_addressSize;	 //Address size in bytes 4/8
-		mach_header_64 m_ident;
 		BNEndianness m_endian;
 		uint32_t m_archId;
 		Ref<Architecture> m_arch;
 		Ref<Platform> m_plat = nullptr;
 		bool m_dylibFile;
 		bool m_objectFile;
-		std::vector<std::string> m_sectionNames;
 		std::vector<std::string> m_symbols;
-		DataBuffer m_stringList;
-		size_t m_stringListSize;
-		uint64_t m_relocationBase;
-		// Section and program headers, internally use 64-bit form as it is a superset of 32-bit
-		std::vector<segment_command_64> m_segments; //only three types of sections __TEXT, __DATA, __IMPORT
-		std::vector<section_64> m_sections;
 
-		symtab_command m_symtab;
-		dysymtab_command m_dysymtab;
-		dyld_info_command m_dyldInfo;
-		routines_command_64 m_routines64;
-		function_starts_command m_functionStarts;
-		std::vector<section_64> m_moduleInitSections;
-		linkedit_data_command m_exportTrie;
-		linkedit_data_command m_chainedFixups {};
-
-		std::vector<section_64> m_symbolStubSections;
-		std::vector<section_64> m_symbolPointerSections;
-
-		std::vector<std::string> m_dylibs;
-
-		build_version_command m_buildVersion;
-		std::vector<build_tool_version> m_buildToolVersions;
-
-		bool m_dysymPresent = false;
-		bool m_dyldInfoPresent = false;
-		bool m_routinesPresent = false;
-		bool m_functionStartsPresent = false;
 		bool m_relocatable = false;
 
 		bool m_extractMangledTypes;
@@ -1286,23 +1323,29 @@ namespace BinaryNinja
 		SymbolQueue* m_symbolQueue = nullptr;
 		Ref<Logger> m_logger;
 
+		std::vector<segment_command_64> m_allSegments; //only three types of sections __TEXT, __DATA, __IMPORT
+		std::vector<section_64> m_allSections;
+
+		MachOHeader HeaderForAddress(BinaryView* data, uint64_t address, bool isMainHeader);
+		bool InitializeHeader(MachOHeader& header, bool isMainHeader, uint64_t preferredImageBase, std::string preferredImageBaseDesc);
+
 		void RebaseThreadStarts(BinaryReader& virtualReader, std::vector<uint32_t>& threadStarts, uint64_t stepMultiplier);
 		Ref<Symbol> DefineMachoSymbol(
 			BNSymbolType type, const std::string& name, uint64_t addr, BNSymbolBinding binding, bool deferred);
-		void ParseSymbolTable(BinaryReader& reader, const symtab_command& symtab, const std::vector<uint32_t>& symbolStubsList);
+		void ParseSymbolTable(BinaryReader& reader, MachOHeader& header, const symtab_command& symtab, const std::vector<uint32_t>& symbolStubsList);
 		bool IsValidFunctionStart(uint64_t addr);
-		void ParseFunctionStarts(Platform* platform);
+		void ParseFunctionStarts(Platform* platform, uint64_t textBase, function_starts_command functionStarts);
 		bool ParseRelocationEntry(const relocation_info& info, uint64_t start, BNRelocationInfo& result);
 
-		void ParseExportTrie(BinaryReader& reader);
+		void ParseExportTrie(BinaryReader& reader, linkedit_data_command exportTrie);
 		void ReadExportNode(DataBuffer& buffer, std::vector<ExportNode>& results, const std::string& currentText,
 			size_t cursor, uint32_t endGuard);
 
-		void ParseDynamicTable(BinaryReader& reader, BNSymbolType type, uint32_t tableOffset, uint32_t tableSize,
+		void ParseDynamicTable(BinaryReader& reader, MachOHeader& header, BNSymbolType type, uint32_t tableOffset, uint32_t tableSize,
 			BNSymbolBinding binding);
-		bool GetSectionPermissions(uint64_t address, uint32_t &flags);
-		bool GetSegmentPermissions(uint64_t address, uint32_t &flags);
-		void ParseChainedFixups();
+		bool GetSectionPermissions(MachOHeader& header, uint64_t address, uint32_t &flags);
+		bool GetSegmentPermissions(MachOHeader& header, uint64_t address, uint32_t &flags);
+		void ParseChainedFixups(linkedit_data_command chainedFixups);
 
 		virtual uint64_t PerformGetEntryPoint() const override;
 

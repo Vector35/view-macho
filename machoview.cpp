@@ -202,14 +202,10 @@ uint64_t readValidULEB128(DataBuffer& buffer, size_t& cursor)
 
 
 MachoView::MachoView(const string& typeName, BinaryView* data, bool parseOnly): BinaryView(typeName, data->GetFile(), data),
-	m_universalImageOffset(0), m_parseOnly(parseOnly), m_stringListSize(0), m_relocationBase(0)
+	m_universalImageOffset(0), m_parseOnly(parseOnly)
 {
 	CreateLogger("BinaryView");
 	m_logger = CreateLogger("BinaryView.MachoView");
-
-	memset(&m_symtab, 0, sizeof(m_symtab));
-	memset(&m_dysymtab, 0, sizeof(m_dysymtab));
-	memset(&m_dyldInfo, 0, sizeof(m_dyldInfo));
 
 	m_backedByDatabase = data->GetFile()->IsBackedByDatabase(typeName);
 
@@ -268,41 +264,56 @@ MachoView::MachoView(const string& typeName, BinaryView* data, bool parseOnly): 
 		}
 	}
 
+	m_header = HeaderForAddress(data, 0, true);
+}
 
-	// Read common header fields
-	string errorMsg;
-	m_loadCommandOffset = g_machoViewType->ParseHeaders(data, m_universalImageOffset, m_ident, &m_arch, &m_plat, errorMsg);
-	if (!m_loadCommandOffset)
+
+MachOHeader MachoView::HeaderForAddress(BinaryView* data, uint64_t address, bool isMainHeader)
+{
+	MachOHeader header;
+
+	bzero(&header, sizeof(MachOHeader));
+	header.stringList = new DataBuffer();
+
+	std::string errorMsg;
+	header.loadCommandOffset = g_machoViewType->ParseHeaders(data, m_universalImageOffset + address, header.ident, &m_arch, &m_plat, errorMsg);
+	if (!header.loadCommandOffset)
 		throw MachoFormatException(errorMsg);
 
-	if (m_ident.magic == MH_MAGIC || m_ident.magic == MH_MAGIC_64)
+	if (isMainHeader)
 	{
-		m_endian = LittleEndian;
-		m_logger->LogDebug("Recognized Little Endian Mach-O");
-	}
-	else // (m_ident.magic == MH_CIGAM || m_ident.magic == MH_CIGAM_64)
-	{
-		m_endian = BigEndian;
-		m_logger->LogDebug("Recognized Big Endian Mach-O");
+		if (header.ident.magic == MH_MAGIC || header.ident.magic == MH_MAGIC_64)
+		{
+			m_endian = LittleEndian;
+			m_logger->LogDebug("Recognized Little Endian Mach-O");
+		}
+		else // (header.ident.magic == MH_CIGAM || header.ident.magic == MH_CIGAM_64)
+		{
+			m_endian = BigEndian;
+			m_logger->LogDebug("Recognized Big Endian Mach-O");
+		}
 	}
 
 	BinaryReader reader(data);
 	reader.SetEndianness(m_endian);
 	reader.SetVirtualBase(m_universalImageOffset);
-	reader.Seek(m_loadCommandOffset);
+	reader.Seek(header.loadCommandOffset);
 
-	m_objectFile = m_ident.filetype == MH_OBJECT;
-	m_dylibFile = m_ident.filetype == MH_DYLIB;
-	m_relocatable = ((m_ident.flags & MH_PIE) > 0) || m_objectFile || m_dylibFile;
-	m_archId = m_ident.cputype;
-	m_addressSize = (m_ident.cputype & MachOABIMask) == MachOABI64 ? 8 : 4;
+	if (isMainHeader)
+	{
+		m_objectFile = header.ident.filetype == MH_OBJECT;
+		m_dylibFile = header.ident.filetype == MH_DYLIB;
+		m_relocatable = ((header.ident.flags & MH_PIE) > 0) || m_objectFile || m_dylibFile;
+		m_archId = header.ident.cputype;
+		m_addressSize = (header.ident.cputype & MachOABIMask) == MachOABI64 ? 8 : 4;
+	}
 
 	bool first = true;
 	// Parse segment commands
 	try
 	{
-		m_logger->LogDebug("ident.ncmds: %d\n", m_ident.ncmds);
-		for (size_t i = 0; i < m_ident.ncmds; i++)
+		m_logger->LogDebug("ident.ncmds: %d\n", header.ident.ncmds);
+		for (size_t i = 0; i < header.ident.ncmds; i++)
 		{
 			load_command load;
 			segment_command_64 segment64;
@@ -318,57 +329,57 @@ MachoView::MachoView(const string& typeName, BinaryView* data, bool parseOnly): 
 
 			switch (load.cmd)
 			{
-				case LC_MAIN:
+			case LC_MAIN:
+			{
+				uint64_t entryPoint = reader.Read64();
+				m_logger->LogDebug("LC_MAIN entryPoint: %#016" PRIx64, entryPoint);
+				header.entryPoints.push_back({entryPoint, true});
+				(void)reader.Read64(); // Stack start
+				break;
+			}
+			case LC_SEGMENT: //map the 32bit version to 64 bits
+				m_logger->LogDebug("LC_SEGMENT\n");
+				segment64.cmd = LC_SEGMENT_64;
+				reader.Read(&segment64.segname, 16);
+				segment64.vmaddr = reader.Read32();
+				segment64.vmsize = reader.Read32();
+				segment64.fileoff = reader.Read32() + m_universalImageOffset;
+				segment64.filesize = reader.Read32();
+				segment64.maxprot = reader.Read32();
+				segment64.initprot = reader.Read32();
+				segment64.nsects = reader.Read32();
+				segment64.flags = reader.Read32();
+				if (first)
 				{
-					uint64_t entryPoint = reader.Read64();
-					m_logger->LogDebug("LC_MAIN entryPoint: %#016" PRIx64, entryPoint);
-					entryPoints.push_back({entryPoint, true});
-					(void)reader.Read64(); // Stack start
-					break;
-				}
-				case LC_SEGMENT: //map the 32bit version to 64 bits
-					m_logger->LogDebug("LC_SEGMENT\n");
-					segment64.cmd = LC_SEGMENT_64;
-					reader.Read(&segment64.segname, 16);
-					segment64.vmaddr = reader.Read32();
-					segment64.vmsize = reader.Read32();
-					segment64.fileoff = reader.Read32() + m_universalImageOffset;
-					segment64.filesize = reader.Read32();
-					segment64.maxprot = reader.Read32();
-					segment64.initprot = reader.Read32();
-					segment64.nsects = reader.Read32();
-					segment64.flags = reader.Read32();
-					if (first)
-					{
-						if (!((m_ident.flags & MH_SPLIT_SEGS) || m_ident.cputype == MACHO_CPU_TYPE_X86_64)
-						  || (segment64.flags & MACHO_VM_PROT_WRITE))
+						if (!((header.ident.flags & MH_SPLIT_SEGS) || header.ident.cputype == MACHO_CPU_TYPE_X86_64)
+							|| (segment64.flags & MACHO_VM_PROT_WRITE))
 						{
-							m_relocationBase = segment64.vmaddr;
+							header.relocationBase = segment64.vmaddr;
 							first = false;
 						}
-					}
-					m_logger->LogDebug("\tName:     %s\n" \
-							"\tCmd:      %#08"  PRIx32 "\n" \
-							"\tvmaddr:   %#016" PRIx64 "\n" \
-							"\tvmsize:   %#016" PRIx64 "\n" \
-							"\tfileoff:  %#016" PRIx64 "\n" \
-							"\tfilesize: %#016" PRIx64 "\n" \
-							"\tmaxprot:  %#08"  PRIx32 "\n" \
-							"\tinitprot: %#08"  PRIx32 "\n" \
-							"\tnsects:   %#08"  PRIx32 "\n" \
-							"\tflags:    %#08"  PRIx32 "\n",
-							(char*)&segment64.segname,
-							segment64.cmd,
-							segment64.vmaddr,
-							segment64.vmsize,
-							segment64.fileoff,
-							segment64.filesize,
-							segment64.maxprot,
-							segment64.initprot,
-							segment64.nsects,
-							segment64.flags);
-					for (size_t j = 0; j < segment64.nsects; j++)
-					{
+				}
+				m_logger->LogDebug("\tName:     %s\n" \
+					"\tCmd:      %#08"  PRIx32 "\n" \
+					"\tvmaddr:   %#016" PRIx64 "\n" \
+					"\tvmsize:   %#016" PRIx64 "\n" \
+					"\tfileoff:  %#016" PRIx64 "\n" \
+					"\tfilesize: %#016" PRIx64 "\n" \
+					"\tmaxprot:  %#08"  PRIx32 "\n" \
+					"\tinitprot: %#08"  PRIx32 "\n" \
+					"\tnsects:   %#08"  PRIx32 "\n" \
+					"\tflags:    %#08"  PRIx32 "\n",
+					(char*)&segment64.segname,
+					segment64.cmd,
+					segment64.vmaddr,
+					segment64.vmsize,
+					segment64.fileoff,
+					segment64.filesize,
+					segment64.maxprot,
+					segment64.initprot,
+					segment64.nsects,
+					segment64.flags);
+				for (size_t j = 0; j < segment64.nsects; j++)
+				{
 						reader.Read(&sect.sectname, 16);
 						reader.Read(&sect.segname, 16);
 						sect.addr = reader.Read32();
@@ -382,89 +393,93 @@ MachoView::MachoView(const string& typeName, BinaryView* data, bool parseOnly): 
 						sect.reserved2 = reader.Read32();
 						// if the segment isn't mapped into virtual memory don't add the corresponding sections.
 						if (segment64.vmsize > 0)
-							m_sections.push_back(sect);
+						{
+							header.sections.push_back(sect);
+							m_allSections.push_back(sect);
+						}
 						else
 							m_logger->LogInfo("Omitting section %16s at %#" PRIx64 " corresponding to segment %16s which is not mapped into memory", (char*)&sect.sectname, sect.addr, (char*)&sect.segname);
 
 						m_logger->LogDebug("\t\tSegName:  %16s\n" \
-								"\t\tSectName: %16s\n" \
-								"\t\tAddr:     %#" PRIx64 "\n" \
-								"\t\tSize:     %#" PRIx64 "\n" \
-								"\t\tOffset:   %#" PRIx32 "\n" \
-								"\t\tAlign:    %#" PRIx32 "\n" \
-								"\t\tReloff:   %#" PRIx32 "\n" \
-								"\t\tNReloc:   %#" PRIx32 "\n" \
-								"\t\tFlags:    %#" PRIx32 "\n" \
-								"\t\tReserved1:%#" PRIx32 "\n" \
-								"\t\tReserved2:%#" PRIx32 "\n" \
-								"\t\t------------------------\n",
-								(char*)&sect.segname,
-								(char*)&sect.sectname,
-								sect.addr,
-								sect.size,
-								sect.offset,
-								sect.align,
-								sect.reloff,
-								sect.nreloc,
-								sect.flags,
-								sect.reserved1,
-								sect.reserved2);
+							"\t\tSectName: %16s\n" \
+							"\t\tAddr:     %#" PRIx64 "\n" \
+							"\t\tSize:     %#" PRIx64 "\n" \
+							"\t\tOffset:   %#" PRIx32 "\n" \
+							"\t\tAlign:    %#" PRIx32 "\n" \
+							"\t\tReloff:   %#" PRIx32 "\n" \
+							"\t\tNReloc:   %#" PRIx32 "\n" \
+							"\t\tFlags:    %#" PRIx32 "\n" \
+							"\t\tReserved1:%#" PRIx32 "\n" \
+							"\t\tReserved2:%#" PRIx32 "\n" \
+							"\t\t------------------------\n",
+							(char*)&sect.segname,
+							(char*)&sect.sectname,
+							sect.addr,
+							sect.size,
+							sect.offset,
+							sect.align,
+							sect.reloff,
+							sect.nreloc,
+							sect.flags,
+							sect.reserved1,
+							sect.reserved2);
 						if (!strncmp(sect.sectname, "__mod_init_func", 15))
-							m_moduleInitSections.push_back(sect);
+							header.moduleInitSections.push_back(sect);
 						if ((sect.flags & (S_ATTR_SELF_MODIFYING_CODE | S_SYMBOL_STUBS)) == (S_ATTR_SELF_MODIFYING_CODE | S_SYMBOL_STUBS))
-							m_symbolStubSections.push_back(sect);
+							header.symbolStubSections.push_back(sect);
 						if ((sect.flags & S_NON_LAZY_SYMBOL_POINTERS) == S_NON_LAZY_SYMBOL_POINTERS)
-							m_symbolPointerSections.push_back(sect);
+							header.symbolPointerSections.push_back(sect);
 						if ((sect.flags & S_LAZY_SYMBOL_POINTERS) == S_LAZY_SYMBOL_POINTERS)
-							m_symbolPointerSections.push_back(sect);
-					}
-					m_segments.push_back(segment64);
-					break;
-				case LC_SEGMENT_64:
-					m_logger->LogDebug("LC_SEGMENT_64\n");
-					segment64.cmd = LC_SEGMENT_64;
-					reader.Read(&segment64.segname, 16);
-					segment64.vmaddr = reader.Read64();
-					segment64.vmsize = reader.Read64();
-					segment64.fileoff = reader.Read64() + m_universalImageOffset;
-					segment64.filesize = reader.Read64();
-					segment64.maxprot = reader.Read32();
-					segment64.initprot = reader.Read32();
-					segment64.nsects = reader.Read32();
-					segment64.flags = reader.Read32();
-					if (first)
-					{
-						if (!((m_ident.flags & MH_SPLIT_SEGS) || m_ident.cputype == MACHO_CPU_TYPE_X86_64)
-						  || (segment64.flags & MACHO_VM_PROT_WRITE))
+							header.symbolPointerSections.push_back(sect);
+				}
+				header.segments.push_back(segment64);
+				m_allSegments.push_back(segment64);
+				break;
+			case LC_SEGMENT_64:
+				m_logger->LogDebug("LC_SEGMENT_64\n");
+				segment64.cmd = LC_SEGMENT_64;
+				reader.Read(&segment64.segname, 16);
+				segment64.vmaddr = reader.Read64();
+				segment64.vmsize = reader.Read64();
+				segment64.fileoff = reader.Read64() + m_universalImageOffset;
+				segment64.filesize = reader.Read64();
+				segment64.maxprot = reader.Read32();
+				segment64.initprot = reader.Read32();
+				segment64.nsects = reader.Read32();
+				segment64.flags = reader.Read32();
+				if (first)
+				{
+						if (!((header.ident.flags & MH_SPLIT_SEGS) || header.ident.cputype == MACHO_CPU_TYPE_X86_64)
+							|| (segment64.flags & MACHO_VM_PROT_WRITE))
 						{
-							m_relocationBase = segment64.vmaddr;
+							header.relocationBase = segment64.vmaddr;
 							first = false;
 						}
-					}
-					m_logger->LogDebug(
-							"\tName:     %s\n" \
-							"\tCmd:      %#08"  PRIx32 "\n" \
-							"\tvmaddr:   %#016" PRIx64 "\n" \
-							"\tvmsize:   %#016" PRIx64 "\n" \
-							"\tfileoff:  %#016" PRIx64 "\n" \
-							"\tfilesize: %#016" PRIx64 "\n" \
-							"\tmaxprot:  %#08"  PRIx32 "\n" \
-							"\tinitprot: %#08"  PRIx32 "\n" \
-							"\tnsects:   %#08"  PRIx32 "\n" \
-							"\tflags:    %#08"  PRIx32 "\n",
-							(char*)&segment64.segname,
-							segment64.cmd,
-							segment64.vmaddr,
-							segment64.vmsize,
-							segment64.fileoff,
-							segment64.filesize,
-							segment64.maxprot,
-							segment64.initprot,
-							segment64.nsects,
-							segment64.flags);
-					m_logger->LogDebug("\t\t------------------------\n");
-					for (size_t j = 0; j < segment64.nsects; j++)
-					{
+				}
+				m_logger->LogDebug(
+					"\tName:     %s\n" \
+					"\tCmd:      %#08"  PRIx32 "\n" \
+					"\tvmaddr:   %#016" PRIx64 "\n" \
+					"\tvmsize:   %#016" PRIx64 "\n" \
+					"\tfileoff:  %#016" PRIx64 "\n" \
+					"\tfilesize: %#016" PRIx64 "\n" \
+					"\tmaxprot:  %#08"  PRIx32 "\n" \
+					"\tinitprot: %#08"  PRIx32 "\n" \
+					"\tnsects:   %#08"  PRIx32 "\n" \
+					"\tflags:    %#08"  PRIx32 "\n",
+					(char*)&segment64.segname,
+					segment64.cmd,
+					segment64.vmaddr,
+					segment64.vmsize,
+					segment64.fileoff,
+					segment64.filesize,
+					segment64.maxprot,
+					segment64.initprot,
+					segment64.nsects,
+					segment64.flags);
+				m_logger->LogDebug("\t\t------------------------\n");
+				for (size_t j = 0; j < segment64.nsects; j++)
+				{
 						reader.Read(&sect.sectname, 16);
 						reader.Read(&sect.segname, 16);
 						sect.addr = reader.Read64();
@@ -479,189 +494,193 @@ MachoView::MachoView(const string& typeName, BinaryView* data, bool parseOnly): 
 						sect.reserved3 = reader.Read32();
 						// if the segment isn't mapped into virtual memory don't add the corresponding sections.
 						if (segment64.vmsize > 0)
-							m_sections.push_back(sect);
+						{
+							header.sections.push_back(sect);
+							m_allSections.push_back(sect);
+						}
 						else
 							m_logger->LogInfo("Omitting section %16s at %#" PRIx64 " corresponding to segment %16s which is not mapped into memory", (char*)&sect.sectname, sect.addr, (char*)&sect.segname);
 						m_logger->LogDebug(
-								"\t\tSegName:  %16s\n" \
-								"\t\tSectName: %16s\n" \
-								"\t\tAddr:     %#" PRIx64 "\n" \
-								"\t\tSize:     %#" PRIx64 "\n" \
-								"\t\tOffset:   %#" PRIx32 "\n" \
-								"\t\tAlign:    %#" PRIx32 "\n" \
-								"\t\tReloff:   %#" PRIx32 "\n" \
-								"\t\tNReloc:   %#" PRIx32 "\n" \
-								"\t\tFlags:    %#" PRIx32 "\n" \
-								"\t\tReserved1:%#" PRIx32 "\n" \
-								"\t\tReserved2:%#" PRIx32 "\n" \
-								"\t\tReserved3:%#" PRIx32 "\n" \
-								"\t\t------------------------\n",
-								(char*)&sect.segname,
-								(char*)&sect.sectname,
-								sect.addr,
-								sect.size,
-								sect.offset,
-								sect.align,
-								sect.reloff,
-								sect.nreloc,
-								sect.flags,
-								sect.reserved1,
-								sect.reserved2,
-								sect.reserved3);
+							"\t\tSegName:  %16s\n" \
+							"\t\tSectName: %16s\n" \
+							"\t\tAddr:     %#" PRIx64 "\n" \
+							"\t\tSize:     %#" PRIx64 "\n" \
+							"\t\tOffset:   %#" PRIx32 "\n" \
+							"\t\tAlign:    %#" PRIx32 "\n" \
+							"\t\tReloff:   %#" PRIx32 "\n" \
+							"\t\tNReloc:   %#" PRIx32 "\n" \
+							"\t\tFlags:    %#" PRIx32 "\n" \
+							"\t\tReserved1:%#" PRIx32 "\n" \
+							"\t\tReserved2:%#" PRIx32 "\n" \
+							"\t\tReserved3:%#" PRIx32 "\n" \
+							"\t\t------------------------\n",
+							(char*)&sect.segname,
+							(char*)&sect.sectname,
+							sect.addr,
+							sect.size,
+							sect.offset,
+							sect.align,
+							sect.reloff,
+							sect.nreloc,
+							sect.flags,
+							sect.reserved1,
+							sect.reserved2,
+							sect.reserved3);
 						if (!strncmp(sect.sectname, "__mod_init_func", 15))
-							m_moduleInitSections.push_back(sect);
+							header.moduleInitSections.push_back(sect);
 						if ((sect.flags & (S_ATTR_SELF_MODIFYING_CODE | S_SYMBOL_STUBS)) == (S_ATTR_SELF_MODIFYING_CODE | S_SYMBOL_STUBS))
-							m_symbolStubSections.push_back(sect);
+							header.symbolStubSections.push_back(sect);
 						if ((sect.flags & S_NON_LAZY_SYMBOL_POINTERS) == S_NON_LAZY_SYMBOL_POINTERS)
-							m_symbolPointerSections.push_back(sect);
+							header.symbolPointerSections.push_back(sect);
 						if ((sect.flags & S_LAZY_SYMBOL_POINTERS) == S_LAZY_SYMBOL_POINTERS)
-							m_symbolPointerSections.push_back(sect);
-					}
-					m_segments.push_back(segment64);
-					break;
-				case LC_ROUTINES: //map the 32bit version to 64bits
-					m_logger->LogDebug("LC_REOUTINES\n");
-					m_routines64.cmd = LC_ROUTINES_64;
-					m_routines64.init_address = reader.Read32();
-					m_routines64.init_module = reader.Read32();
-					m_routines64.reserved1 = reader.Read32();
-					m_routines64.reserved2 = reader.Read32();
-					m_routines64.reserved3 = reader.Read32();
-					m_routines64.reserved4 = reader.Read32();
-					m_routines64.reserved5 = reader.Read32();
-					m_routines64.reserved6 = reader.Read32();
-					m_routinesPresent = true;
-					m_logger->LogDebug("\tinit_address: %016" PRIx64 "\n\tinit_module: %08" PRIx64 "\n",
-							m_routines64.init_address, m_routines64.init_module);
-					break;
-				case LC_ROUTINES_64:
-					m_logger->LogDebug("LC_REOUTINES_64\n");
-					m_routines64.cmd = LC_ROUTINES_64;
-					m_routines64.init_address = reader.Read64();
-					m_routines64.init_module = reader.Read64();
-					m_routines64.reserved1 = reader.Read64();
-					m_routines64.reserved2 = reader.Read64();
-					m_routines64.reserved3 = reader.Read64();
-					m_routines64.reserved4 = reader.Read64();
-					m_routines64.reserved5 = reader.Read64();
-					m_routines64.reserved6 = reader.Read64();
-					m_routinesPresent = true;
-					m_logger->LogDebug("\tinit_address: %016" PRIx64 "\n\tinit_module: %08" PRIx64 "\n",
-							m_routines64.init_address, m_routines64.init_module);
-					break;
-				case LC_FUNCTION_STARTS:
-					m_logger->LogDebug("LC_FUNCTION_STARTS\n");
-					m_functionStarts.funcoff = reader.Read32();
-					m_functionStarts.funcsize = reader.Read32();
-					m_functionStartsPresent = true;
-					m_logger->LogDebug("\tFunction Starts:\n\toffset: %#08" PRIx32 "\n\tsize: %#08" PRIx32 "\n",
-							m_functionStarts.funcoff, m_functionStarts.funcsize);
-					break;
-				case LC_SYMTAB:
-					m_logger->LogDebug("LC_SYMTAB\n");
-					m_symtab.symoff  = reader.Read32();
-					m_symtab.nsyms   = reader.Read32();
-					m_symtab.stroff  = reader.Read32();
-					m_symtab.strsize = reader.Read32();
-					reader.Seek(m_symtab.stroff);
-					m_stringList = reader.Read(m_symtab.strsize);
-					m_stringListSize = m_symtab.strsize;
-					m_logger->LogDebug("\tstrsize: %08x\n" \
-							"\tstroff: %08x\n" \
-							"\tnsyms: %08x\n",
-							m_symtab.strsize,
-							m_symtab.stroff,
-							m_symtab.nsyms);
-					break;
-				case LC_DYSYMTAB:
-					m_logger->LogDebug("LC_DYSYMTAB\n");
-					m_dysymtab.ilocalsym = reader.Read32();
-					m_dysymtab.nlocalsym = reader.Read32();
-					m_dysymtab.iextdefsym = reader.Read32();
-					m_dysymtab.nextdefsym = reader.Read32();
-					m_dysymtab.iundefsym = reader.Read32();
-					m_dysymtab.nundefsym = reader.Read32();
-					m_dysymtab.tocoff = reader.Read32();
-					m_dysymtab.ntoc = reader.Read32();
-					m_dysymtab.modtaboff = reader.Read32();
-					m_dysymtab.nmodtab = reader.Read32();
-					m_dysymtab.extrefsymoff = reader.Read32();
-					m_dysymtab.nextrefsyms = reader.Read32();
-					m_dysymtab.indirectsymoff = reader.Read32();
-					m_dysymtab.nindirectsyms = reader.Read32();
-					m_dysymtab.extreloff = reader.Read32();
-					m_dysymtab.nextrel = reader.Read32();
-					m_dysymtab.locreloff = reader.Read32();
-					m_dysymtab.nlocrel = reader.Read32();
-					m_logger->LogDebug("\tm_dysymtab.ilocalsym      0x%08x\n"\
-					         "\tm_dysymtab.nlocalsym      0x%08x\n"\
-					         "\tm_dysymtab.iextdefsym     0x%08x\n"\
-					         "\tm_dysymtab.nextdefsym     0x%08x\n"\
-					         "\tm_dysymtab.iundefsym      0x%08x\n"\
-					         "\tm_dysymtab.nundefsym      0x%08x\n"\
-					         "\tm_dysymtab.tocoff         0x%08x\n"\
-					         "\tm_dysymtab.ntoc           0x%08x\n"\
-					         "\tm_dysymtab.modtaboff      0x%08x\n"\
-					         "\tm_dysymtab.nmodtab        0x%08x\n"\
-					         "\tm_dysymtab.extrefsymoff   0x%08x\n"\
-					         "\tm_dysymtab.nextrefsyms    0x%08x\n"\
-					         "\tm_dysymtab.indirectsymoff 0x%08x\n"\
-					         "\tm_dysymtab.nindirectsyms  0x%08x\n"\
-					         "\tm_dysymtab.extreloff      0x%08x\n"\
-					         "\tm_dysymtab.nextrel        0x%08x\n"\
-					         "\tm_dysymtab.locreloff      0x%08x\n"\
-					         "\tm_dysymtab.nlocrel        0x%08x\n",
-					         m_dysymtab.ilocalsym,
-					         m_dysymtab.nlocalsym,
-					         m_dysymtab.iextdefsym,
-					         m_dysymtab.nextdefsym,
-					         m_dysymtab.iundefsym,
-					         m_dysymtab.nundefsym,
-					         m_dysymtab.tocoff,
-					         m_dysymtab.ntoc,
-					         m_dysymtab.modtaboff,
-					         m_dysymtab.nmodtab,
-					         m_dysymtab.extrefsymoff,
-					         m_dysymtab.nextrefsyms,
-					         m_dysymtab.indirectsymoff,
-					         m_dysymtab.nindirectsyms,
-					         m_dysymtab.extreloff,
-					         m_dysymtab.nextrel,
-					         m_dysymtab.locreloff,
-					         m_dysymtab.nlocrel);
-					m_dysymPresent = true;
-					break;
-				case LC_DYLD_CHAINED_FIXUPS:
-					m_logger->LogDebug("LC_DYLD_CHAINED_FIXUPS\n");
-					m_chainedFixups.dataoff = reader.Read32();
-					m_chainedFixups.datasize = reader.Read32();
-					break;
-				case LC_DYLD_INFO:
-				case LC_DYLD_INFO_ONLY:
-					m_logger->LogDebug("LC_DYLD_INFO\n");
-					m_dyldInfo.rebase_off = reader.Read32();
-					m_dyldInfo.rebase_size = reader.Read32();
-					m_dyldInfo.bind_off = reader.Read32();
-					m_dyldInfo.bind_size = reader.Read32();
-					m_dyldInfo.weak_bind_off = reader.Read32();
-					m_dyldInfo.weak_bind_size = reader.Read32();
-					m_dyldInfo.lazy_bind_off = reader.Read32();
-					m_dyldInfo.lazy_bind_size = reader.Read32();
-					m_dyldInfo.export_off = reader.Read32();
-					m_dyldInfo.export_size = reader.Read32();
-					m_exportTrie.dataoff = m_dyldInfo.export_off;
-					m_exportTrie.datasize = m_dyldInfo.export_size;
-					m_dyldInfoPresent = true;
-					break;
-				case LC_DYLD_EXPORTS_TRIE:
-					m_logger->LogDebug("LC_DYLD_EXPORTS_TRIE\n");
-					m_exportTrie.dataoff = reader.Read32();
-					m_exportTrie.datasize = reader.Read32();
-					break;
-				case LC_THREAD:
-				case LC_UNIXTHREAD:
-					while (reader.GetOffset() < nextOffset)
-					{
+							header.symbolPointerSections.push_back(sect);
+				}
+				header.segments.push_back(segment64);
+				m_allSegments.push_back(segment64);
+				break;
+			case LC_ROUTINES: //map the 32bit version to 64bits
+				m_logger->LogDebug("LC_REOUTINES\n");
+				header.routines64.cmd = LC_ROUTINES_64;
+				header.routines64.init_address = reader.Read32();
+				header.routines64.init_module = reader.Read32();
+				header.routines64.reserved1 = reader.Read32();
+				header.routines64.reserved2 = reader.Read32();
+				header.routines64.reserved3 = reader.Read32();
+				header.routines64.reserved4 = reader.Read32();
+				header.routines64.reserved5 = reader.Read32();
+				header.routines64.reserved6 = reader.Read32();
+				header.routinesPresent = true;
+				m_logger->LogDebug("\tinit_address: %016" PRIx64 "\n\tinit_module: %08" PRIx64 "\n",
+					header.routines64.init_address, header.routines64.init_module);
+				break;
+			case LC_ROUTINES_64:
+				m_logger->LogDebug("LC_REOUTINES_64\n");
+				header.routines64.cmd = LC_ROUTINES_64;
+				header.routines64.init_address = reader.Read64();
+				header.routines64.init_module = reader.Read64();
+				header.routines64.reserved1 = reader.Read64();
+				header.routines64.reserved2 = reader.Read64();
+				header.routines64.reserved3 = reader.Read64();
+				header.routines64.reserved4 = reader.Read64();
+				header.routines64.reserved5 = reader.Read64();
+				header.routines64.reserved6 = reader.Read64();
+				header.routinesPresent = true;
+				m_logger->LogDebug("\tinit_address: %016" PRIx64 "\n\tinit_module: %08" PRIx64 "\n",
+					header.routines64.init_address, header.routines64.init_module);
+				break;
+			case LC_FUNCTION_STARTS:
+				m_logger->LogDebug("LC_FUNCTION_STARTS\n");
+				header.functionStarts.funcoff = reader.Read32();
+				header.functionStarts.funcsize = reader.Read32();
+				header.functionStartsPresent = true;
+				m_logger->LogDebug("\tFunction Starts:\n\toffset: %#08" PRIx32 "\n\tsize: %#08" PRIx32 "\n",
+					header.functionStarts.funcoff, header.functionStarts.funcsize);
+				break;
+			case LC_SYMTAB:
+				m_logger->LogDebug("LC_SYMTAB\n");
+				header.symtab.symoff  = reader.Read32();
+				header.symtab.nsyms   = reader.Read32();
+				header.symtab.stroff  = reader.Read32();
+				header.symtab.strsize = reader.Read32();
+				reader.Seek(header.symtab.stroff);
+				header.stringList->Append(reader.Read(header.symtab.strsize));
+				header.stringListSize = header.symtab.strsize;
+				m_logger->LogDebug("\tstrsize: %08x\n" \
+					"\tstroff: %08x\n" \
+					"\tnsyms: %08x\n",
+					header.symtab.strsize,
+					header.symtab.stroff,
+					header.symtab.nsyms);
+				break;
+			case LC_DYSYMTAB:
+				m_logger->LogDebug("LC_DYSYMTAB\n");
+				header.dysymtab.ilocalsym = reader.Read32();
+				header.dysymtab.nlocalsym = reader.Read32();
+				header.dysymtab.iextdefsym = reader.Read32();
+				header.dysymtab.nextdefsym = reader.Read32();
+				header.dysymtab.iundefsym = reader.Read32();
+				header.dysymtab.nundefsym = reader.Read32();
+				header.dysymtab.tocoff = reader.Read32();
+				header.dysymtab.ntoc = reader.Read32();
+				header.dysymtab.modtaboff = reader.Read32();
+				header.dysymtab.nmodtab = reader.Read32();
+				header.dysymtab.extrefsymoff = reader.Read32();
+				header.dysymtab.nextrefsyms = reader.Read32();
+				header.dysymtab.indirectsymoff = reader.Read32();
+				header.dysymtab.nindirectsyms = reader.Read32();
+				header.dysymtab.extreloff = reader.Read32();
+				header.dysymtab.nextrel = reader.Read32();
+				header.dysymtab.locreloff = reader.Read32();
+				header.dysymtab.nlocrel = reader.Read32();
+				m_logger->LogDebug("\theader.dysymtab.ilocalsym      0x%08x\n"\
+					"\theader.dysymtab.nlocalsym      0x%08x\n"\
+					"\theader.dysymtab.iextdefsym     0x%08x\n"\
+					"\theader.dysymtab.nextdefsym     0x%08x\n"\
+					"\theader.dysymtab.iundefsym      0x%08x\n"\
+					"\theader.dysymtab.nundefsym      0x%08x\n"\
+					"\theader.dysymtab.tocoff         0x%08x\n"\
+					"\theader.dysymtab.ntoc           0x%08x\n"\
+					"\theader.dysymtab.modtaboff      0x%08x\n"\
+					"\theader.dysymtab.nmodtab        0x%08x\n"\
+					"\theader.dysymtab.extrefsymoff   0x%08x\n"\
+					"\theader.dysymtab.nextrefsyms    0x%08x\n"\
+					"\theader.dysymtab.indirectsymoff 0x%08x\n"\
+					"\theader.dysymtab.nindirectsyms  0x%08x\n"\
+					"\theader.dysymtab.extreloff      0x%08x\n"\
+					"\theader.dysymtab.nextrel        0x%08x\n"\
+					"\theader.dysymtab.locreloff      0x%08x\n"\
+					"\theader.dysymtab.nlocrel        0x%08x\n",
+					header.dysymtab.ilocalsym,
+					header.dysymtab.nlocalsym,
+					header.dysymtab.iextdefsym,
+					header.dysymtab.nextdefsym,
+					header.dysymtab.iundefsym,
+					header.dysymtab.nundefsym,
+					header.dysymtab.tocoff,
+					header.dysymtab.ntoc,
+					header.dysymtab.modtaboff,
+					header.dysymtab.nmodtab,
+					header.dysymtab.extrefsymoff,
+					header.dysymtab.nextrefsyms,
+					header.dysymtab.indirectsymoff,
+					header.dysymtab.nindirectsyms,
+					header.dysymtab.extreloff,
+					header.dysymtab.nextrel,
+					header.dysymtab.locreloff,
+					header.dysymtab.nlocrel);
+				header.dysymPresent = true;
+				break;
+			case LC_DYLD_CHAINED_FIXUPS:
+				m_logger->LogDebug("LC_DYLD_CHAINED_FIXUPS\n");
+				header.chainedFixups.dataoff = reader.Read32();
+				header.chainedFixups.datasize = reader.Read32();
+				break;
+			case LC_DYLD_INFO:
+			case LC_DYLD_INFO_ONLY:
+				m_logger->LogDebug("LC_DYLD_INFO\n");
+				header.dyldInfo.rebase_off = reader.Read32();
+				header.dyldInfo.rebase_size = reader.Read32();
+				header.dyldInfo.bind_off = reader.Read32();
+				header.dyldInfo.bind_size = reader.Read32();
+				header.dyldInfo.weak_bind_off = reader.Read32();
+				header.dyldInfo.weak_bind_size = reader.Read32();
+				header.dyldInfo.lazy_bind_off = reader.Read32();
+				header.dyldInfo.lazy_bind_size = reader.Read32();
+				header.dyldInfo.export_off = reader.Read32();
+				header.dyldInfo.export_size = reader.Read32();
+				header.exportTrie.dataoff = header.dyldInfo.export_off;
+				header.exportTrie.datasize = header.dyldInfo.export_size;
+				header.dyldInfoPresent = true;
+				break;
+			case LC_DYLD_EXPORTS_TRIE:
+				m_logger->LogDebug("LC_DYLD_EXPORTS_TRIE\n");
+				header.exportTrie.dataoff = reader.Read32();
+				header.exportTrie.datasize = reader.Read32();
+				break;
+			case LC_THREAD:
+			case LC_UNIXTHREAD:
+				while (reader.GetOffset() < nextOffset)
+				{
 						thread_command thread;
 						thread.flavor = reader.Read32();
 						thread.count = reader.Read32();
@@ -677,7 +696,7 @@ MachoView::MachoView(const string& typeName, BinaryView* data, bool parseOnly): 
 							}
 							//This wont be big endian so we can just read the whole thing
 							reader.Read(&thread.statex64, sizeof(thread.statex64));
-							entryPoints.push_back({thread.statex64.rip, false});
+							header.entryPoints.push_back({thread.statex64.rip, false});
 							break;
 						case MachOx86:
 							m_logger->LogDebug("x86 Thread state\n");
@@ -688,7 +707,7 @@ MachoView::MachoView(const string& typeName, BinaryView* data, bool parseOnly): 
 							}
 							//This wont be big endian so we can just read the whole thing
 							reader.Read(&thread.statex86, sizeof(thread.statex86));
-							entryPoints.push_back({thread.statex86.eip, false});
+							header.entryPoints.push_back({thread.statex86.eip, false});
 							break;
 						case MachOArm:
 							m_logger->LogDebug("Arm Thread state\n");
@@ -699,7 +718,7 @@ MachoView::MachoView(const string& typeName, BinaryView* data, bool parseOnly): 
 							}
 							//This wont be big endian so we can just read the whole thing
 							reader.Read(&thread.statearmv7, sizeof(thread.statearmv7));
-							entryPoints.push_back({thread.statearmv7.r15, false});
+							header.entryPoints.push_back({thread.statearmv7.r15, false});
 							break;
 						case MachOAarch64:
 						case MachOAarch6432:
@@ -710,7 +729,7 @@ MachoView::MachoView(const string& typeName, BinaryView* data, bool parseOnly): 
 								break;
 							}
 							reader.Read(&thread.stateaarch64, sizeof(thread.stateaarch64));
-							entryPoints.push_back({thread.stateaarch64.pc, false});
+							header.entryPoints.push_back({thread.stateaarch64.pc, false});
 							break;
 						case MachOPPC:
 							m_logger->LogDebug("PPC Thread state\n");
@@ -720,7 +739,7 @@ MachoView::MachoView(const string& typeName, BinaryView* data, bool parseOnly): 
 								break;
 							}
 							//Read individual entries for endian reasons
-							entryPoints.push_back({reader.Read32(), false});
+							header.entryPoints.push_back({reader.Read32(), false});
 							(void)reader.Read32();
 							(void)reader.Read32();
 							//Read the rest of the structure
@@ -733,7 +752,7 @@ MachoView::MachoView(const string& typeName, BinaryView* data, bool parseOnly): 
 								reader.SeekRelative(thread.count * sizeof(uint32_t));
 								break;
 							}
-							entryPoints.push_back({reader.Read64(), false});
+							header.entryPoints.push_back({reader.Read64(), false});
 							(void)reader.Read64();
 							(void)reader.Read64(); // Stack start
 							(void)reader.Read(&thread.stateppc64.r1, sizeof(thread.stateppc64) - (3 * 8));
@@ -741,70 +760,41 @@ MachoView::MachoView(const string& typeName, BinaryView* data, bool parseOnly): 
 						default:
 							m_logger->LogError("Unknown archid: %x", m_archId);
 						}
-					}
-					break;
-				case LC_LOAD_DYLIB:
-					{
-						uint32_t offset = reader.Read32();
-						if (offset < nextOffset)
-						{
-							reader.Seek(curOffset + offset);
-							string libname = reader.ReadCString();
-							m_dylibs.push_back(libname);
-						}
-					}
-					break;
-				case LC_BUILD_VERSION:
+				}
+				break;
+			case LC_LOAD_DYLIB:
+			{
+				uint32_t offset = reader.Read32();
+				if (offset < nextOffset)
 				{
-					m_logger->LogDebug("LC_BUILD_VERSION:");
-					m_buildVersion.platform = reader.Read32();
-					m_buildVersion.minos = reader.Read32();
-					m_buildVersion.sdk = reader.Read32();
-					m_buildVersion.ntools = reader.Read32();
-					m_logger->LogDebug("Platform: %s", BuildPlatformToString(m_buildVersion.platform).c_str());
-					m_logger->LogDebug("MinOS: %s", BuildToolVersionToString(m_buildVersion.minos).c_str());
-					m_logger->LogDebug("SDK: %s", BuildToolVersionToString(m_buildVersion.sdk).c_str());
-					for (uint32_t i = 0; (i < m_buildVersion.ntools) && (i < 10); i++)
-					{
+						reader.Seek(curOffset + offset);
+						string libname = reader.ReadCString();
+						header.dylibs.push_back(libname);
+				}
+			}
+			break;
+			case LC_BUILD_VERSION:
+			{
+				m_logger->LogDebug("LC_BUILD_VERSION:");
+				header.buildVersion.platform = reader.Read32();
+				header.buildVersion.minos = reader.Read32();
+				header.buildVersion.sdk = reader.Read32();
+				header.buildVersion.ntools = reader.Read32();
+				m_logger->LogDebug("Platform: %s", BuildPlatformToString(header.buildVersion.platform).c_str());
+				m_logger->LogDebug("MinOS: %s", BuildToolVersionToString(header.buildVersion.minos).c_str());
+				m_logger->LogDebug("SDK: %s", BuildToolVersionToString(header.buildVersion.sdk).c_str());
+				for (uint32_t i = 0; (i < header.buildVersion.ntools) && (i < 10); i++)
+				{
 						uint32_t tool = reader.Read32();
 						uint32_t version = reader.Read32();
-						m_buildToolVersions.push_back({tool, version});
+						header.buildToolVersions.push_back({tool, version});
 						m_logger->LogDebug("Build Tool: %s: %s", BuildToolToString(tool).c_str(), BuildToolVersionToString(version).c_str());
-					}
-					break;
 				}
-				// case LC_UUID:                 LogDebug("LC_UUID");                 bytesRead = sizeof(load); break;
-				// case LC_ID_DYLIB:             LogDebug("LC_ID_DYLIB");             bytesRead = sizeof(load); break;
-				// case LC_LOAD_WEAK_DYLIB:      LogDebug("LC_LOAD_WEAK_DYLIB");      bytesRead = sizeof(load); break;
-				// case LC_LOAD_DYLINKER:        LogDebug("LC_LOAD_DYLINKER");        bytesRead = sizeof(load); break;
-				// case LC_ID_DYLINKER:          LogDebug("LC_ID_DYLINKER");          bytesRead = sizeof(load); break;
-				// case LC_PREBOUND_DYLIB:       LogDebug("LC_PREBOUND_DYLIB");       bytesRead = sizeof(load); break;
-				// case LC_SUB_FRAMEWORK:        LogDebug("LC_SUB_FRAMEWORK");        bytesRead = sizeof(load); break;
-				// case LC_SUB_UMBRELLA:         LogDebug("LC_SUB_UMBRELLA");         bytesRead = sizeof(load); break;
-				// case LC_SUB_CLIENT:           LogDebug("LC_SUB_CLIENT");           bytesRead = sizeof(load); break;
-				// case LC_SUB_LIBRARY:          LogDebug("LC_SUB_LIBRARY");          bytesRead = sizeof(load); break;
-				// case LC_TWOLEVEL_HINTS:       LogDebug("LC_TWOLEVEL_HINTS");       bytesRead = sizeof(load); break;
-				// case LC_IDENT:                LogDebug("LC_IDENT");                bytesRead = sizeof(load); break;
-				// case LC_FVMFILE:              LogDebug("LC_FVMFILE");              bytesRead = sizeof(load); break;
-				// case LC_PREPAGE:              LogDebug("LC_PREPAGE");              bytesRead = sizeof(load); break;
-				// case LC_LOADFVMLIB:           LogDebug("LC_LOADFVMLIB");           bytesRead = sizeof(load); break;
-				// case LC_IDFVMLIB:             LogDebug("LC_IDFVMLIB");             bytesRead = sizeof(load); break;
-				// case LC_PREBIND_CKSUM:        LogDebug("LC_PREBIND_CKSUM");        bytesRead = sizeof(load); break;
-				// case LC_RPATH:                LogDebug("LC_RPATH");                bytesRead = sizeof(load); break;
-				// case LC_CODE_SIGNATURE:       LogDebug("LC_CODE_SIGNATURE");       bytesRead = sizeof(load); break;
-				// case LC_SEGMENT_SPLIT_INFO:   LogDebug("LC_SEGMENT_SPLIT_INFO");   bytesRead = sizeof(load); break;
-				// case LC_REEXPORT_DYLIB:       LogDebug("LC_REEXPORT_DYLIB");       bytesRead = sizeof(load); break;
-				// case LC_LAZY_LOAD_DYLIB:      LogDebug("LC_LAZY_LOAD_DYLIB");      bytesRead = sizeof(load); break;
-				// case LC_ENCRYPTION_INFO:      LogDebug("LC_ENCRYPTION_INFO");      bytesRead = sizeof(load); break;
-				// case LC_SOURCE_VERSION:       LogDebug("LC_SOURCE_VERSION");       bytesRead = sizeof(load); break;
-				// case LC_DYLD_ENVIRONMENT:     LogDebug("LC_DYLD_ENVIRONMENT");     bytesRead = sizeof(load); break;
-				// case LC_VERSION_MIN_IPHONEOS: LogDebug("LC_VERSION_MIN_IPHONEOS"); bytesRead = sizeof(load); break;
-				// case LC_VERSION_MIN_MACOSX:   LogDebug("LC_VERSION_MIN_MACOSX");   bytesRead = sizeof(load); break;
-				// case LC_DATA_IN_CODE:         LogDebug("LC_DATA_IN_CODE");         bytesRead = sizeof(load); break;
-				// case LC_DYLIB_CODE_SIGN_DRS:  LogDebug("LC_DYLIB_CODE_SIGN_DRS");  bytesRead = sizeof(load); break;
-				default:
-					m_logger->LogDebug("Unhandled command: %s : %" PRIu32 "\n", CommandToString(load.cmd).c_str(), load.cmdsize);
-					break;
+				break;
+			}
+			default:
+				m_logger->LogDebug("Unhandled command: %s : %" PRIu32 "\n", CommandToString(load.cmd).c_str(), load.cmdsize);
+				break;
 			}
 			if (reader.GetOffset() != nextOffset)
 			{
@@ -817,6 +807,8 @@ MachoView::MachoView(const string& typeName, BinaryView* data, bool parseOnly): 
 	{
 		throw MachoFormatException("Mach-O section headers invalid");
 	}
+
+	return header;
 }
 
 
@@ -922,25 +914,22 @@ bool MachoView::IsValidFunctionStart(uint64_t addr)
 }
 
 
-void MachoView::ParseFunctionStarts(Platform* platform)
+void MachoView::ParseFunctionStarts(Platform* platform, uint64_t textBase, function_starts_command functionStarts)
 {
-	if (m_functionStartsPresent == false)
-		return;
-
 	BinaryReader reader(GetParentView());
 	reader.SetEndianness(m_endian);
 	reader.SetVirtualBase(m_universalImageOffset);
 	try
 	{
-		reader.Seek(m_functionStarts.funcoff);
-		DataBuffer buffer = reader.Read(m_functionStarts.funcsize);
+		reader.Seek(functionStarts.funcoff);
+		DataBuffer buffer = reader.Read(functionStarts.funcsize);
 		size_t i = 0;
-		uint64_t curfunc = m_textBase;
+		uint64_t curfunc = textBase;
 		uint64_t curOffset = 0;
 
-		while (i < m_functionStarts.funcsize)
+		while (i < functionStarts.funcsize)
 		{
-			curOffset = readLEB128(buffer, m_functionStarts.funcsize, i);
+			curOffset = readLEB128(buffer, functionStarts.funcsize, i);
 			if (curOffset == 0)
 				continue;
 			curfunc += curOffset;
@@ -1028,7 +1017,7 @@ bool MachoView::Init()
 	uint64_t initialImageBase = 0;
 	bool initialImageBaseSet = false;
 	string preferredImageBaseDesc;
-	for (const auto& i : m_segments)
+	for (const auto& i : m_header.segments)
 	{
 		if ((i.initprot == MACHO_VM_PROT_NONE) || (!i.vmsize))
 			continue;
@@ -1065,25 +1054,436 @@ bool MachoView::Init()
 	else
 		m_imageBaseAdjustment = -(int64_t)(initialImageBase - preferredImageBase);
 
-	for (auto& i : m_segments)
+	// Add Mach-O file header type info
+	EnumerationBuilder cpuTypeBuilder;
+	cpuTypeBuilder.AddMemberWithValue("CPU_TYPE_ANY", MACHO_CPU_TYPE_ANY);
+	cpuTypeBuilder.AddMemberWithValue("CPU_TYPE_VAX", MACHO_CPU_TYPE_VAX);
+	cpuTypeBuilder.AddMemberWithValue("CPU_TYPE_MC680x0", MACHO_CPU_TYPE_MC680x0);
+	cpuTypeBuilder.AddMemberWithValue("CPU_TYPE_X86", MACHO_CPU_TYPE_X86);
+	cpuTypeBuilder.AddMemberWithValue("CPU_TYPE_X86_64", MACHO_CPU_TYPE_X86_64);
+	cpuTypeBuilder.AddMemberWithValue("CPU_TYPE_MIPS", MACHO_CPU_TYPE_MIPS);
+	cpuTypeBuilder.AddMemberWithValue("CPU_TYPE_MC98000", MACHO_CPU_TYPE_MC98000);
+	cpuTypeBuilder.AddMemberWithValue("CPU_TYPE_HPPA", MACHO_CPU_TYPE_HPPA);
+	cpuTypeBuilder.AddMemberWithValue("CPU_TYPE_ARM", MACHO_CPU_TYPE_ARM);
+	cpuTypeBuilder.AddMemberWithValue("CPU_TYPE_ARM64", MACHO_CPU_TYPE_ARM64);
+	cpuTypeBuilder.AddMemberWithValue("CPU_TYPE_ARM64_32", MACHO_CPU_TYPE_ARM64_32);
+	cpuTypeBuilder.AddMemberWithValue("CPU_TYPE_MC88000", MACHO_CPU_TYPE_MC88000);
+	cpuTypeBuilder.AddMemberWithValue("CPU_TYPE_SPARC", MACHO_CPU_TYPE_SPARC);
+	cpuTypeBuilder.AddMemberWithValue("CPU_TYPE_I860", MACHO_CPU_TYPE_I860);
+	cpuTypeBuilder.AddMemberWithValue("CPU_TYPE_ALPHA", MACHO_CPU_TYPE_ALPHA);
+	cpuTypeBuilder.AddMemberWithValue("CPU_TYPE_POWERPC", MACHO_CPU_TYPE_POWERPC);
+	cpuTypeBuilder.AddMemberWithValue("CPU_TYPE_POWERPC64", MACHO_CPU_TYPE_POWERPC64);
+	Ref<Enumeration> cpuTypeEnum = cpuTypeBuilder.Finalize();
+
+	Ref<Type> cpuTypeEnumType = Type::EnumerationType(nullptr, cpuTypeEnum, 4, false);
+	string cpuTypeEnumName = "cpu_type_t";
+	string cpuTypeEnumId = Type::GenerateAutoTypeId("macho", cpuTypeEnumName);
+	m_typeNames.cpuTypeEnumQualName = DefineType(cpuTypeEnumId, cpuTypeEnumName, cpuTypeEnumType);
+
+	EnumerationBuilder fileTypeBuilder;
+	fileTypeBuilder.AddMemberWithValue("MH_OBJECT", MH_OBJECT);
+	fileTypeBuilder.AddMemberWithValue("MH_EXECUTE", MH_EXECUTE);
+	fileTypeBuilder.AddMemberWithValue("MH_FVMLIB", MH_FVMLIB);
+	fileTypeBuilder.AddMemberWithValue("MH_CORE", MH_CORE);
+	fileTypeBuilder.AddMemberWithValue("MH_PRELOAD", MH_PRELOAD);
+	fileTypeBuilder.AddMemberWithValue("MH_DYLIB", MH_DYLIB);
+	fileTypeBuilder.AddMemberWithValue("MH_DYLINKER", MH_DYLINKER);
+	fileTypeBuilder.AddMemberWithValue("MH_BUNDLE", MH_BUNDLE);
+	fileTypeBuilder.AddMemberWithValue("MH_DYLIB_STUB", MH_DYLIB_STUB);
+	fileTypeBuilder.AddMemberWithValue("MH_DSYM", MH_DSYM);
+	fileTypeBuilder.AddMemberWithValue("MH_KEXT_BUNDLE", MH_KEXT_BUNDLE);
+	Ref<Enumeration> fileTypeEnum = fileTypeBuilder.Finalize();
+
+	Ref<Type> fileTypeEnumType = Type::EnumerationType(nullptr, fileTypeEnum, 4, false);
+	string fileTypeEnumName = "file_type_t";
+	string fileTypeEnumId = Type::GenerateAutoTypeId("macho", fileTypeEnumName);
+	m_typeNames.fileTypeEnumQualName = DefineType(fileTypeEnumId, fileTypeEnumName, fileTypeEnumType);
+
+	EnumerationBuilder flagsTypeBuilder;
+	flagsTypeBuilder.AddMemberWithValue("MH_NOUNDEFS", MH_NOUNDEFS);
+	flagsTypeBuilder.AddMemberWithValue("MH_INCRLINK", MH_INCRLINK);
+	flagsTypeBuilder.AddMemberWithValue("MH_DYLDLINK", MH_DYLDLINK);
+	flagsTypeBuilder.AddMemberWithValue("MH_BINDATLOAD", MH_BINDATLOAD);
+	flagsTypeBuilder.AddMemberWithValue("MH_PREBOUND", MH_PREBOUND);
+	flagsTypeBuilder.AddMemberWithValue("MH_SPLIT_SEGS", MH_SPLIT_SEGS);
+	flagsTypeBuilder.AddMemberWithValue("MH_LAZY_INIT", MH_LAZY_INIT);
+	flagsTypeBuilder.AddMemberWithValue("MH_TWOLEVEL", MH_TWOLEVEL);
+	flagsTypeBuilder.AddMemberWithValue("MH_FORCE_FLAT", MH_FORCE_FLAT);
+	flagsTypeBuilder.AddMemberWithValue("MH_NOMULTIDEFS", MH_NOMULTIDEFS);
+	flagsTypeBuilder.AddMemberWithValue("MH_NOFIXPREBINDING", MH_NOFIXPREBINDING);
+	flagsTypeBuilder.AddMemberWithValue("MH_PREBINDABLE", MH_PREBINDABLE);
+	flagsTypeBuilder.AddMemberWithValue("MH_ALLMODSBOUND", MH_ALLMODSBOUND);
+	flagsTypeBuilder.AddMemberWithValue("MH_SUBSECTIONS_VIA_SYMBOLS", MH_SUBSECTIONS_VIA_SYMBOLS);
+	flagsTypeBuilder.AddMemberWithValue("MH_CANONICAL", MH_CANONICAL);
+	flagsTypeBuilder.AddMemberWithValue("MH_WEAK_DEFINES", MH_WEAK_DEFINES);
+	flagsTypeBuilder.AddMemberWithValue("MH_BINDS_TO_WEAK", MH_BINDS_TO_WEAK);
+	flagsTypeBuilder.AddMemberWithValue("MH_ALLOW_STACK_EXECUTION", MH_ALLOW_STACK_EXECUTION);
+	flagsTypeBuilder.AddMemberWithValue("MH_ROOT_SAFE", MH_ROOT_SAFE);
+	flagsTypeBuilder.AddMemberWithValue("MH_SETUID_SAFE", MH_SETUID_SAFE);
+	flagsTypeBuilder.AddMemberWithValue("MH_NO_REEXPORTED_DYLIBS", MH_NO_REEXPORTED_DYLIBS);
+	flagsTypeBuilder.AddMemberWithValue("MH_PIE", MH_PIE);
+	flagsTypeBuilder.AddMemberWithValue("MH_DEAD_STRIPPABLE_DYLIB", MH_DEAD_STRIPPABLE_DYLIB);
+	flagsTypeBuilder.AddMemberWithValue("MH_HAS_TLV_DESCRIPTORS", MH_HAS_TLV_DESCRIPTORS);
+	flagsTypeBuilder.AddMemberWithValue("MH_NO_HEAP_EXECUTION", MH_NO_HEAP_EXECUTION);
+	flagsTypeBuilder.AddMemberWithValue("MH_APP_EXTENSION_SAFE", _MH_APP_EXTENSION_SAFE);
+	flagsTypeBuilder.AddMemberWithValue("MH_NLIST_OUTOFSYNC_WITH_DYLDINFO", _MH_NLIST_OUTOFSYNC_WITH_DYLDINFO);
+	flagsTypeBuilder.AddMemberWithValue("MH_SIM_SUPPORT", _MH_SIM_SUPPORT);
+	flagsTypeBuilder.AddMemberWithValue("MH_DYLIB_IN_CACHE", _MH_DYLIB_IN_CACHE);
+	Ref<Enumeration> flagsTypeEnum = flagsTypeBuilder.Finalize();
+
+	Ref<Type> flagsTypeEnumType = Type::EnumerationType(nullptr, flagsTypeEnum, 4, false);
+	string flagsTypeEnumName = "flags_type_t";
+	string flagsTypeEnumId = Type::GenerateAutoTypeId("macho", flagsTypeEnumName);
+	m_typeNames.flagsTypeEnumQualName = DefineType(flagsTypeEnumId, flagsTypeEnumName, flagsTypeEnumType);
+
+	StructureBuilder machoHeaderBuilder;
+	machoHeaderBuilder.AddMember(Type::IntegerType(4, false), "magic");
+	machoHeaderBuilder.AddMember(Type::NamedType(this, m_typeNames.cpuTypeEnumQualName), "cputype");
+	machoHeaderBuilder.AddMember(Type::IntegerType(4, false), "cpusubtype");
+	machoHeaderBuilder.AddMember(Type::NamedType(this, m_typeNames.fileTypeEnumQualName), "filetype");
+	machoHeaderBuilder.AddMember(Type::IntegerType(4, false), "ncmds");
+	machoHeaderBuilder.AddMember(Type::IntegerType(4, false), "sizeofcmds");
+	machoHeaderBuilder.AddMember(Type::NamedType(this, m_typeNames.flagsTypeEnumQualName), "flags");
+	if (m_addressSize == 8)
+		machoHeaderBuilder.AddMember(Type::IntegerType(4, false), "reserved");
+	Ref<Structure> machoHeaderStruct = machoHeaderBuilder.Finalize();
+	QualifiedName headerName = (m_addressSize == 8) ? string("mach_header_64") : string("mach_header");
+
+	string headerTypeId = Type::GenerateAutoTypeId("macho", headerName);
+	Ref<Type> machoHeaderType = Type::StructureType(machoHeaderStruct);
+	m_typeNames.headerQualName = DefineType(headerTypeId, headerName, machoHeaderType);
+
+	EnumerationBuilder cmdTypeBuilder;
+	cmdTypeBuilder.AddMemberWithValue("LC_REQ_DYLD", LC_REQ_DYLD);
+	cmdTypeBuilder.AddMemberWithValue("LC_SEGMENT", LC_SEGMENT);
+	cmdTypeBuilder.AddMemberWithValue("LC_SYMTAB", LC_SYMTAB);
+	cmdTypeBuilder.AddMemberWithValue("LC_SYMSEG",LC_SYMSEG);
+	cmdTypeBuilder.AddMemberWithValue("LC_THREAD", LC_THREAD);
+	cmdTypeBuilder.AddMemberWithValue("LC_UNIXTHREAD", LC_UNIXTHREAD);
+	cmdTypeBuilder.AddMemberWithValue("LC_LOADFVMLIB", LC_LOADFVMLIB);
+	cmdTypeBuilder.AddMemberWithValue("LC_IDFVMLIB", LC_IDFVMLIB);
+	cmdTypeBuilder.AddMemberWithValue("LC_IDENT", LC_IDENT);
+	cmdTypeBuilder.AddMemberWithValue("LC_FVMFILE", LC_FVMFILE);
+	cmdTypeBuilder.AddMemberWithValue("LC_PREPAGE", LC_PREPAGE);
+	cmdTypeBuilder.AddMemberWithValue("LC_DYSYMTAB", LC_DYSYMTAB);
+	cmdTypeBuilder.AddMemberWithValue("LC_LOAD_DYLIB", LC_LOAD_DYLIB);
+	cmdTypeBuilder.AddMemberWithValue("LC_ID_DYLIB", LC_ID_DYLIB);
+	cmdTypeBuilder.AddMemberWithValue("LC_LOAD_DYLINKER", LC_LOAD_DYLINKER);
+	cmdTypeBuilder.AddMemberWithValue("LC_ID_DYLINKER", LC_ID_DYLINKER);
+	cmdTypeBuilder.AddMemberWithValue("LC_PREBOUND_DYLIB", LC_PREBOUND_DYLIB);
+	cmdTypeBuilder.AddMemberWithValue("LC_ROUTINES", LC_ROUTINES);
+	cmdTypeBuilder.AddMemberWithValue("LC_SUB_FRAMEWORK", LC_SUB_FRAMEWORK);
+	cmdTypeBuilder.AddMemberWithValue("LC_SUB_UMBRELLA", LC_SUB_UMBRELLA);
+	cmdTypeBuilder.AddMemberWithValue("LC_SUB_CLIENT", LC_SUB_CLIENT);
+	cmdTypeBuilder.AddMemberWithValue("LC_SUB_LIBRARY", LC_SUB_LIBRARY);
+	cmdTypeBuilder.AddMemberWithValue("LC_TWOLEVEL_HINTS", LC_TWOLEVEL_HINTS);
+	cmdTypeBuilder.AddMemberWithValue("LC_PREBIND_CKSUM", LC_PREBIND_CKSUM);
+	cmdTypeBuilder.AddMemberWithValue("LC_LOAD_WEAK_DYLIB", LC_LOAD_WEAK_DYLIB);//       (0x18 | LC_REQ_DYLD)
+	cmdTypeBuilder.AddMemberWithValue("LC_SEGMENT_64", LC_SEGMENT_64);
+	cmdTypeBuilder.AddMemberWithValue("LC_ROUTINES_64", LC_ROUTINES_64);
+	cmdTypeBuilder.AddMemberWithValue("LC_UUID", LC_UUID);
+	cmdTypeBuilder.AddMemberWithValue("LC_RPATH", LC_RPATH);//                 (0x1c | LC_REQ_DYLD)
+	cmdTypeBuilder.AddMemberWithValue("LC_CODE_SIGNATURE", LC_CODE_SIGNATURE);
+	cmdTypeBuilder.AddMemberWithValue("LC_SEGMENT_SPLIT_INFO", LC_SEGMENT_SPLIT_INFO);
+	cmdTypeBuilder.AddMemberWithValue("LC_REEXPORT_DYLIB", LC_REEXPORT_DYLIB);//        (0x1f | LC_REQ_DYLD)
+	cmdTypeBuilder.AddMemberWithValue("LC_LAZY_LOAD_DYLIB", LC_LAZY_LOAD_DYLIB);
+	cmdTypeBuilder.AddMemberWithValue("LC_ENCRYPTION_INFO", LC_ENCRYPTION_INFO);
+	cmdTypeBuilder.AddMemberWithValue("LC_DYLD_INFO", LC_DYLD_INFO);
+	cmdTypeBuilder.AddMemberWithValue("LC_DYLD_INFO_ONLY", LC_DYLD_INFO_ONLY);//        (0x22 | LC_REQ_DYLD)
+	cmdTypeBuilder.AddMemberWithValue("LC_LOAD_UPWARD_DYLIB", LC_LOAD_UPWARD_DYLIB);//     (0x23 | LC_REQ_DYLD)
+	cmdTypeBuilder.AddMemberWithValue("LC_VERSION_MIN_MACOSX", LC_VERSION_MIN_MACOSX);
+	cmdTypeBuilder.AddMemberWithValue("LC_VERSION_MIN_IPHONEOS", LC_VERSION_MIN_IPHONEOS);
+	cmdTypeBuilder.AddMemberWithValue("LC_FUNCTION_STARTS", LC_FUNCTION_STARTS);
+	cmdTypeBuilder.AddMemberWithValue("LC_DYLD_ENVIRONMENT", LC_DYLD_ENVIRONMENT);
+	cmdTypeBuilder.AddMemberWithValue("LC_MAIN", LC_MAIN);//                  (0x28 | LC_REQ_DYLD)
+	cmdTypeBuilder.AddMemberWithValue("LC_DATA_IN_CODE", LC_DATA_IN_CODE);
+	cmdTypeBuilder.AddMemberWithValue("LC_SOURCE_VERSION", LC_SOURCE_VERSION);
+	cmdTypeBuilder.AddMemberWithValue("LC_DYLIB_CODE_SIGN_DRS", LC_DYLIB_CODE_SIGN_DRS);
+	cmdTypeBuilder.AddMemberWithValue("LC_ENCRYPTION_INFO_64", _LC_ENCRYPTION_INFO_64);
+	cmdTypeBuilder.AddMemberWithValue("LC_LINKER_OPTION", _LC_LINKER_OPTION);
+	cmdTypeBuilder.AddMemberWithValue("LC_LINKER_OPTIMIZATION_HINT", _LC_LINKER_OPTIMIZATION_HINT);
+	cmdTypeBuilder.AddMemberWithValue("LC_VERSION_MIN_TVOS", _LC_VERSION_MIN_TVOS);
+	cmdTypeBuilder.AddMemberWithValue("LC_VERSION_MIN_WATCHOS", LC_VERSION_MIN_WATCHOS);
+	cmdTypeBuilder.AddMemberWithValue("LC_NOTE", LC_NOTE);
+	cmdTypeBuilder.AddMemberWithValue("LC_BUILD_VERSION", LC_BUILD_VERSION);
+	cmdTypeBuilder.AddMemberWithValue("LC_DYLD_EXPORTS_TRIE", LC_DYLD_EXPORTS_TRIE);
+	cmdTypeBuilder.AddMemberWithValue("LC_DYLD_CHAINED_FIXUPS", LC_DYLD_CHAINED_FIXUPS);
+	cmdTypeBuilder.AddMemberWithValue("LC_FILESET_ENTRY", LC_DYLD_CHAINED_FIXUPS);
+	Ref<Enumeration> cmdTypeEnum = cmdTypeBuilder.Finalize();
+
+	Ref<Type> cmdTypeEnumType = Type::EnumerationType(nullptr, cmdTypeEnum, 4, false);
+	string cmdTypeEnumName = "load_command_type_t";
+	string cmdTypeEnumId = Type::GenerateAutoTypeId("macho", cmdTypeEnumName);
+	m_typeNames.cmdTypeEnumQualName = DefineType(cmdTypeEnumId, cmdTypeEnumName, cmdTypeEnumType);
+
+	StructureBuilder loadCommandBuilder;
+	loadCommandBuilder.AddMember(Type::NamedType(this, m_typeNames.cmdTypeEnumQualName), "cmd");
+	loadCommandBuilder.AddMember(Type::IntegerType(4, false), "cmdsize");
+	Ref<Structure> loadCommandStruct = loadCommandBuilder.Finalize();
+	QualifiedName loadCommandName = string("load_command");
+	string loadCommandTypeId = Type::GenerateAutoTypeId("macho", loadCommandName);
+	Ref<Type> loadCommandType = Type::StructureType(loadCommandStruct);
+	m_typeNames.loadCommandQualName = DefineType(loadCommandTypeId, loadCommandName, loadCommandType);
+
+	EnumerationBuilder protTypeBuilder;
+	protTypeBuilder.AddMemberWithValue("VM_PROT_NONE", MACHO_VM_PROT_NONE);
+	protTypeBuilder.AddMemberWithValue("VM_PROT_READ", MACHO_VM_PROT_READ);
+	protTypeBuilder.AddMemberWithValue("VM_PROT_WRITE", MACHO_VM_PROT_WRITE);
+	protTypeBuilder.AddMemberWithValue("VM_PROT_EXECUTE", MACHO_VM_PROT_EXECUTE);
+	// protTypeBuilder.AddMemberWithValue("VM_PROT_DEFAULT", MACHO_VM_PROT_DEFAULT);
+	// protTypeBuilder.AddMemberWithValue("VM_PROT_ALL", MACHO_VM_PROT_ALL);
+	protTypeBuilder.AddMemberWithValue("VM_PROT_NO_CHANGE", MACHO_VM_PROT_NO_CHANGE);
+	protTypeBuilder.AddMemberWithValue("VM_PROT_COPY_OR_WANTS_COPY", MACHO_VM_PROT_COPY);
+	//protTypeBuilder.AddMemberWithValue("VM_PROT_WANTS_COPY", MACHO_VM_PROT_WANTS_COPY);
+	Ref<Enumeration> protTypeEnum = protTypeBuilder.Finalize();
+
+	Ref<Type> protTypeEnumType = Type::EnumerationType(nullptr, protTypeEnum, 4, false);
+	string protTypeEnumName = "vm_prot_t";
+	string protTypeEnumId = Type::GenerateAutoTypeId("macho", protTypeEnumName);
+	m_typeNames.protTypeEnumQualName = DefineType(protTypeEnumId, protTypeEnumName, protTypeEnumType);
+
+	EnumerationBuilder segFlagsTypeBuilder;
+	segFlagsTypeBuilder.AddMemberWithValue("SG_HIGHVM", SG_HIGHVM);
+	segFlagsTypeBuilder.AddMemberWithValue("SG_FVMLIB", SG_FVMLIB);
+	segFlagsTypeBuilder.AddMemberWithValue("SG_NORELOC", SG_NORELOC);
+	segFlagsTypeBuilder.AddMemberWithValue("SG_PROTECTED_VERSION_1", SG_PROTECTED_VERSION_1);
+	Ref<Enumeration> segFlagsTypeEnum = segFlagsTypeBuilder.Finalize();
+
+	Ref<Type> segFlagsTypeEnumType = Type::EnumerationType(nullptr, segFlagsTypeEnum, 4, false);
+	string segFlagsTypeEnumName = "sg_flags_t";
+	string segFlagsTypeEnumId = Type::GenerateAutoTypeId("macho", segFlagsTypeEnumName);
+	m_typeNames.segFlagsTypeEnumQualName = DefineType(segFlagsTypeEnumId, segFlagsTypeEnumName, segFlagsTypeEnumType);
+
+	StructureBuilder loadSegmentCommandBuilder;
+	loadSegmentCommandBuilder.AddMember(Type::NamedType(this, m_typeNames.cmdTypeEnumQualName), "cmd");
+	loadSegmentCommandBuilder.AddMember(Type::IntegerType(4, false), "cmdsize");
+	loadSegmentCommandBuilder.AddMember(Type::ArrayType(Type::IntegerType(1, true), 16), "segname");
+	loadSegmentCommandBuilder.AddMember(Type::IntegerType(4, false), "vmaddr");
+	loadSegmentCommandBuilder.AddMember(Type::IntegerType(4, false), "vmsize");
+	loadSegmentCommandBuilder.AddMember(Type::IntegerType(4, false), "fileoff");
+	loadSegmentCommandBuilder.AddMember(Type::IntegerType(4, false), "filesize");
+	loadSegmentCommandBuilder.AddMember(Type::NamedType(this, m_typeNames.protTypeEnumQualName), "maxprot");
+	loadSegmentCommandBuilder.AddMember(Type::NamedType(this, m_typeNames.protTypeEnumQualName), "initprot");
+	loadSegmentCommandBuilder.AddMember(Type::IntegerType(4, false), "nsects");
+	loadSegmentCommandBuilder.AddMember(Type::NamedType(this, m_typeNames.segFlagsTypeEnumQualName), "flags");
+	Ref<Structure> loadSegmentCommandStruct = loadSegmentCommandBuilder.Finalize();
+	QualifiedName loadSegmentCommandName = string("segment_command");
+	string loadSegmentCommandTypeId = Type::GenerateAutoTypeId("macho", loadSegmentCommandName);
+	Ref<Type> loadSegmentCommandType = Type::StructureType(loadSegmentCommandStruct);
+	m_typeNames.loadSegmentCommandQualName = DefineType(loadSegmentCommandTypeId, loadSegmentCommandName, loadSegmentCommandType);
+
+	StructureBuilder loadSegmentCommand64Builder;
+	loadSegmentCommand64Builder.AddMember(Type::NamedType(this, m_typeNames.cmdTypeEnumQualName), "cmd");
+	loadSegmentCommand64Builder.AddMember(Type::IntegerType(4, false), "cmdsize");
+	loadSegmentCommand64Builder.AddMember(Type::ArrayType(Type::IntegerType(1, true), 16), "segname");
+	loadSegmentCommand64Builder.AddMember(Type::IntegerType(8, false), "vmaddr");
+	loadSegmentCommand64Builder.AddMember(Type::IntegerType(8, false), "vmsize");
+	loadSegmentCommand64Builder.AddMember(Type::IntegerType(8, false), "fileoff");
+	loadSegmentCommand64Builder.AddMember(Type::IntegerType(8, false), "filesize");
+	loadSegmentCommand64Builder.AddMember(Type::NamedType(this, m_typeNames.protTypeEnumQualName), "maxprot");
+	loadSegmentCommand64Builder.AddMember(Type::NamedType(this, m_typeNames.protTypeEnumQualName), "initprot");
+	loadSegmentCommand64Builder.AddMember(Type::IntegerType(4, false), "nsects");
+	loadSegmentCommand64Builder.AddMember(Type::NamedType(this, m_typeNames.segFlagsTypeEnumQualName), "flags");
+	Ref<Structure> loadSegmentCommand64Struct = loadSegmentCommand64Builder.Finalize();
+	QualifiedName loadSegment64CommandName = string("segment_command_64");
+	string loadSegment64CommandTypeId = Type::GenerateAutoTypeId("macho", loadSegment64CommandName);
+	Ref<Type> loadSegment64CommandType = Type::StructureType(loadSegmentCommand64Struct);
+	m_typeNames.loadSegment64CommandQualName = DefineType(loadSegment64CommandTypeId, loadSegment64CommandName, loadSegment64CommandType);
+
+	StructureBuilder sectionBuilder;
+	sectionBuilder.AddMember(Type::ArrayType(Type::IntegerType(1, true), 16), "sectname");
+	sectionBuilder.AddMember(Type::ArrayType(Type::IntegerType(1, true), 16), "segname");
+	sectionBuilder.AddMember(Type::IntegerType(4, false), "addr");
+	sectionBuilder.AddMember(Type::IntegerType(4, false), "size");
+	sectionBuilder.AddMember(Type::IntegerType(4, false), "offset");
+	sectionBuilder.AddMember(Type::IntegerType(4, false), "align");
+	sectionBuilder.AddMember(Type::IntegerType(4, false), "reloff");
+	sectionBuilder.AddMember(Type::IntegerType(4, false), "nreloc");
+	sectionBuilder.AddMember(Type::IntegerType(4, false), "flags");
+	sectionBuilder.AddMember(Type::IntegerType(4, false), "reserved1");
+	sectionBuilder.AddMember(Type::IntegerType(4, false), "reserved2");
+	Ref<Structure> sectionStruct = sectionBuilder.Finalize();
+	QualifiedName sectionName = string("section");
+	string sectionTypeId = Type::GenerateAutoTypeId("macho", sectionName);
+	Ref<Type> sectionType = Type::StructureType(sectionStruct);
+	m_typeNames.sectionQualName = DefineType(sectionTypeId, sectionName, sectionType);
+
+	StructureBuilder section64Builder;
+	section64Builder.AddMember(Type::ArrayType(Type::IntegerType(1, true), 16), "sectname");
+	section64Builder.AddMember(Type::ArrayType(Type::IntegerType(1, true), 16), "segname");
+	section64Builder.AddMember(Type::IntegerType(8, false), "addr");
+	section64Builder.AddMember(Type::IntegerType(8, false), "size");
+	section64Builder.AddMember(Type::IntegerType(4, false), "offset");
+	section64Builder.AddMember(Type::IntegerType(4, false), "align");
+	section64Builder.AddMember(Type::IntegerType(4, false), "reloff");
+	section64Builder.AddMember(Type::IntegerType(4, false), "nreloc");
+	section64Builder.AddMember(Type::IntegerType(4, false), "flags");
+	section64Builder.AddMember(Type::IntegerType(4, false), "reserved1");
+	section64Builder.AddMember(Type::IntegerType(4, false), "reserved2");
+	section64Builder.AddMember(Type::IntegerType(4, false), "reserved3");
+	Ref<Structure> section64Struct = section64Builder.Finalize();
+	QualifiedName section64Name = string("section_64");
+	string section64TypeId = Type::GenerateAutoTypeId("macho", section64Name);
+	Ref<Type> section64Type = Type::StructureType(section64Struct);
+	m_typeNames.section64QualName = DefineType(section64TypeId, section64Name, section64Type);
+
+	StructureBuilder symtabBuilder;
+	symtabBuilder.AddMember(Type::NamedType(this, m_typeNames.cmdTypeEnumQualName), "cmd");
+	symtabBuilder.AddMember(Type::IntegerType(4, false), "cmdsize");
+	symtabBuilder.AddMember(Type::IntegerType(4, false), "symoff");
+	symtabBuilder.AddMember(Type::IntegerType(4, false), "nsyms");
+	symtabBuilder.AddMember(Type::IntegerType(4, false), "stroff");
+	symtabBuilder.AddMember(Type::IntegerType(4, false), "strsize");
+	Ref<Structure> symtabStruct = symtabBuilder.Finalize();
+	QualifiedName symtabName = string("symtab");
+	string symtabTypeId = Type::GenerateAutoTypeId("macho", symtabName);
+	Ref<Type> symtabType = Type::StructureType(symtabStruct);
+	m_typeNames.symtabQualName = DefineType(symtabTypeId, symtabName, symtabType);
+
+	StructureBuilder dynsymtabBuilder;
+	dynsymtabBuilder.AddMember(Type::NamedType(this, m_typeNames.cmdTypeEnumQualName), "cmd");
+	dynsymtabBuilder.AddMember(Type::IntegerType(4, false), "cmdsize");
+	dynsymtabBuilder.AddMember(Type::IntegerType(4, false), "ilocalsym");
+	dynsymtabBuilder.AddMember(Type::IntegerType(4, false), "nlocalsym");
+	dynsymtabBuilder.AddMember(Type::IntegerType(4, false), "iextdefsym");
+	dynsymtabBuilder.AddMember(Type::IntegerType(4, false), "nextdefsym");
+	dynsymtabBuilder.AddMember(Type::IntegerType(4, false), "iundefsym");
+	dynsymtabBuilder.AddMember(Type::IntegerType(4, false), "nundefsym");
+	dynsymtabBuilder.AddMember(Type::IntegerType(4, false), "tocoff");
+	dynsymtabBuilder.AddMember(Type::IntegerType(4, false), "ntoc");
+	dynsymtabBuilder.AddMember(Type::IntegerType(4, false), "modtaboff");
+	dynsymtabBuilder.AddMember(Type::IntegerType(4, false), "nmodtab");
+	dynsymtabBuilder.AddMember(Type::IntegerType(4, false), "extrefsymoff");
+	dynsymtabBuilder.AddMember(Type::IntegerType(4, false), "nextrefsyms");
+	dynsymtabBuilder.AddMember(Type::IntegerType(4, false), "indirectsymoff");
+	dynsymtabBuilder.AddMember(Type::IntegerType(4, false), "nindirectsyms");
+	dynsymtabBuilder.AddMember(Type::IntegerType(4, false), "extreloff");
+	dynsymtabBuilder.AddMember(Type::IntegerType(4, false), "nextrel");
+	dynsymtabBuilder.AddMember(Type::IntegerType(4, false), "locreloff");
+	dynsymtabBuilder.AddMember(Type::IntegerType(4, false), "nlocrel");
+	Ref<Structure> dynsymtabStruct = dynsymtabBuilder.Finalize();
+	QualifiedName dynsymtabName = string("dynsymtab");
+	string dynsymtabTypeId = Type::GenerateAutoTypeId("macho", dynsymtabName);
+	Ref<Type> dynsymtabType = Type::StructureType(dynsymtabStruct);
+	m_typeNames.dynsymtabQualName = DefineType(dynsymtabTypeId, dynsymtabName, dynsymtabType);
+
+	StructureBuilder uuidBuilder;
+	uuidBuilder.AddMember(Type::NamedType(this, m_typeNames.cmdTypeEnumQualName), "cmd");
+	uuidBuilder.AddMember(Type::IntegerType(4, false), "cmdsize");
+	uuidBuilder.AddMember(Type::ArrayType(Type::IntegerType(1, false), 16), "uuid");
+	Ref<Structure> uuidStruct = uuidBuilder.Finalize();
+	QualifiedName uuidName = string("uuid");
+	string uuidTypeId = Type::GenerateAutoTypeId("macho", uuidName);
+	Ref<Type> uuidType = Type::StructureType(uuidStruct);
+	m_typeNames.uuidQualName = DefineType(uuidTypeId, uuidName, uuidType);
+
+	StructureBuilder linkeditDataBuilder;
+	linkeditDataBuilder.AddMember(Type::NamedType(this, m_typeNames.cmdTypeEnumQualName), "cmd");
+	linkeditDataBuilder.AddMember(Type::IntegerType(4, false), "cmdsize");
+	linkeditDataBuilder.AddMember(Type::IntegerType(4, false), "dataoff");
+	linkeditDataBuilder.AddMember(Type::IntegerType(4, false), "datasize");
+	Ref<Structure> linkeditDataStruct = linkeditDataBuilder.Finalize();
+	QualifiedName linkeditDataName = string("linkedit_data");
+	string linkeditDataTypeId = Type::GenerateAutoTypeId("macho", linkeditDataName);
+	Ref<Type> linkeditDataType = Type::StructureType(linkeditDataStruct);
+	m_typeNames.linkeditDataQualName = DefineType(linkeditDataTypeId, linkeditDataName, linkeditDataType);
+
+	StructureBuilder encryptionInfoBuilder;
+	encryptionInfoBuilder.AddMember(Type::NamedType(this, m_typeNames.cmdTypeEnumQualName), "cmd");
+	encryptionInfoBuilder.AddMember(Type::IntegerType(4, false), "cmdsize");
+	encryptionInfoBuilder.AddMember(Type::IntegerType(4, false), "cryptoff");
+	encryptionInfoBuilder.AddMember(Type::IntegerType(4, false), "cryptsize");
+	encryptionInfoBuilder.AddMember(Type::IntegerType(4, false), "cryptid");
+	Ref<Structure> encryptionInfoStruct = encryptionInfoBuilder.Finalize();
+	QualifiedName encryptionInfoName = string("encryption_info");
+	string encryptionInfoTypeId = Type::GenerateAutoTypeId("macho", encryptionInfoName);
+	Ref<Type> encryptionInfoType = Type::StructureType(encryptionInfoStruct);
+	m_typeNames.encryptionInfoQualName = DefineType(encryptionInfoTypeId, encryptionInfoName, encryptionInfoType);
+
+	StructureBuilder versionMinBuilder;
+	versionMinBuilder.AddMember(Type::NamedType(this, m_typeNames.cmdTypeEnumQualName), "cmd");
+	versionMinBuilder.AddMember(Type::IntegerType(4, false), "cmdsize");
+	versionMinBuilder.AddMember(Type::IntegerType(4, false), "version");
+	versionMinBuilder.AddMember(Type::IntegerType(4, false), "sdk");
+	Ref<Structure> versionMinStruct = versionMinBuilder.Finalize();
+	QualifiedName versionMinName = string("version_min");
+	string versionMinTypeId = Type::GenerateAutoTypeId("macho", versionMinName);
+	Ref<Type> versionMinType = Type::StructureType(versionMinStruct);
+	m_typeNames.versionMinQualName = DefineType(versionMinTypeId, versionMinName, versionMinType);
+
+	StructureBuilder dyldInfoBuilder;
+	dyldInfoBuilder.AddMember(Type::NamedType(this, m_typeNames.cmdTypeEnumQualName), "cmd");
+	dyldInfoBuilder.AddMember(Type::IntegerType(4, false), "cmdsize");
+	dyldInfoBuilder.AddMember(Type::IntegerType(4, false), "rebase_off");
+	dyldInfoBuilder.AddMember(Type::IntegerType(4, false), "rebase_size");
+	dyldInfoBuilder.AddMember(Type::IntegerType(4, false), "bind_off");
+	dyldInfoBuilder.AddMember(Type::IntegerType(4, false), "bind_size");
+	dyldInfoBuilder.AddMember(Type::IntegerType(4, false), "weak_bind_off");
+	dyldInfoBuilder.AddMember(Type::IntegerType(4, false), "weak_bind_size");
+	dyldInfoBuilder.AddMember(Type::IntegerType(4, false), "lazy_bind_off");
+	dyldInfoBuilder.AddMember(Type::IntegerType(4, false), "lazy_bind_size");
+	dyldInfoBuilder.AddMember(Type::IntegerType(4, false), "export_off");
+	dyldInfoBuilder.AddMember(Type::IntegerType(4, false), "export_size");
+	Ref<Structure> dyldInfoStruct = dyldInfoBuilder.Finalize();
+	QualifiedName dyldInfoName = string("dyld_info");
+	string dyldInfoTypeId = Type::GenerateAutoTypeId("macho", dyldInfoName);
+	Ref<Type> dyldInfoType = Type::StructureType(dyldInfoStruct);
+	m_typeNames.dyldInfoQualName = DefineType(dyldInfoTypeId, dyldInfoName, dyldInfoType);
+
+	StructureBuilder dylibBuilder;
+	dylibBuilder.AddMember(Type::IntegerType(4, false), "name");
+	dylibBuilder.AddMember(Type::IntegerType(4, false), "timestamp");
+	dylibBuilder.AddMember(Type::IntegerType(4, false), "current_version");
+	dylibBuilder.AddMember(Type::IntegerType(4, false), "compatibility_version");
+	Ref<Structure> dylibStruct = dylibBuilder.Finalize();
+	QualifiedName dylibName = string("dylib");
+	string dylibTypeId = Type::GenerateAutoTypeId("macho", dylibName);
+	Ref<Type> dylibType = Type::StructureType(dylibStruct);
+	m_typeNames.dylibQualName = DefineType(dylibTypeId, dylibName, dylibType);
+
+	StructureBuilder dylibCommandBuilder;
+	dylibCommandBuilder.AddMember(Type::NamedType(this, m_typeNames.cmdTypeEnumQualName), "cmd");
+	dylibCommandBuilder.AddMember(Type::IntegerType(4, false), "cmdsize");
+	dylibCommandBuilder.AddMember(Type::NamedType(this, m_typeNames.dylibQualName), "dylib");
+	Ref<Structure> dylibCommandStruct = dylibCommandBuilder.Finalize();
+	QualifiedName dylibCommandName = string("dylib_command");
+	string dylibCommandTypeId = Type::GenerateAutoTypeId("macho", dylibCommandName);
+	Ref<Type> dylibCommandType = Type::StructureType(dylibCommandStruct);
+	m_typeNames.dylibCommandQualName = DefineType(dylibCommandTypeId, dylibCommandName, dylibCommandType);
+
+	if (!InitializeHeader(m_header, true, preferredImageBase, preferredImageBaseDesc))
+		return false;
+
+	std::chrono::steady_clock::time_point endTime = std::chrono::steady_clock::now();
+	double t = std::chrono::duration_cast<std::chrono::milliseconds>(endTime - startTime).count() / 1000.0;
+	m_logger->LogInfo("Mach-O parsing took %.3f seconds\n", t);
+	return true;
+}
+
+
+bool MachoView::InitializeHeader(MachOHeader& header, bool isMainHeader, uint64_t preferredImageBase, std::string preferredImageBaseDesc)
+{
+	Ref<Settings> settings = GetLoadSettings(GetTypeName());
+
+	for (auto& i : header.segments)
 		i.vmaddr += m_imageBaseAdjustment;
 
-	for (auto& i : m_sections)
+	for (auto& i : header.sections)
 		i.addr += m_imageBaseAdjustment;
 
-	for (auto& i : m_symbolStubSections)
+	for (auto& i : header.symbolStubSections)
 		i.addr += m_imageBaseAdjustment;
 
-	for (auto& i : m_symbolPointerSections)
+	for (auto& i : header.symbolPointerSections)
 		i.addr += m_imageBaseAdjustment;
 
-	for (auto& entryPoint : entryPoints)
+	for (auto& entryPoint : header.entryPoints)
 		entryPoint.first += (entryPoint.second ? 0 : m_imageBaseAdjustment);
 
-	if (m_routinesPresent)
-		m_routines64.init_address += m_imageBaseAdjustment;
+	if (header.routinesPresent)
+		header.routines64.init_address += m_imageBaseAdjustment;
 
-	for (auto& segment : m_segments)
+	for (auto& segment : header.segments)
 	{
 		if ((segment.initprot == MACHO_VM_PROT_NONE) || (!segment.vmsize))
 			continue;
@@ -1091,17 +1491,17 @@ bool MachoView::Init()
 		if ((segment.initprot & MACHO_VM_PROT_EXECUTE) == MACHO_VM_PROT_EXECUTE)
 		{
 			if ((segment.fileoff == (0 + m_universalImageOffset)) && (segment.filesize != 0))
-				m_textBase = segment.vmaddr;
-			for (auto& entryPoint : entryPoints)
+				header.textBase = segment.vmaddr;
+			for (auto& entryPoint : header.entryPoints)
 			{
-				uint64_t val = entryPoint.first + (entryPoint.second ? m_textBase : 0);
-				if (find(m_entryPoints.begin(), m_entryPoints.end(), val) == m_entryPoints.end())
-					m_entryPoints.push_back(val);
+				uint64_t val = entryPoint.first + (entryPoint.second ? header.textBase : 0);
+				if (find(header.m_entryPoints.begin(), header.m_entryPoints.end(), val) == header.m_entryPoints.end())
+					header.m_entryPoints.push_back(val);
 			}
 		}
 	}
 
-	for (auto& segment : m_segments)
+	for (auto& segment : header.segments)
 	{
 		if ((segment.initprot == MACHO_VM_PROT_NONE) || (!segment.vmsize))
 			continue;
@@ -1120,39 +1520,39 @@ bool MachoView::Init()
 
 		// if we're positive we have an entry point for some reason, force the segment
 		// executable. this helps with kernel images.
-		for (auto& entryPoint : m_entryPoints)
+		for (auto& entryPoint : header.m_entryPoints)
 			if (segment.vmaddr <= entryPoint && (entryPoint < (segment.vmaddr + segment.filesize)))
 				flags |= SegmentExecutable;
 
 		AddAutoSegment(segment.vmaddr, segment.vmsize, segment.fileoff, segment.filesize, flags);
 	}
 
-	for (auto& section : m_sections)
+	for (auto& section : header.sections)
 	{
 		char sectionName[17];
 		memcpy(sectionName, section.sectname, sizeof(section.sectname));
 		sectionName[16] = 0;
-		m_sectionNames.push_back(sectionName);
+		header.sectionNames.push_back(sectionName);
 	}
 
-	m_sectionNames = GetUniqueSectionNames(m_sectionNames);
+	header.sectionNames = GetUniqueSectionNames(header.sectionNames);
 
-	for (size_t i = 0; i < m_sections.size(); i++)
+	for (size_t i = 0; i < header.sections.size(); i++)
 	{
-		if (!m_sections[i].size)
+		if (!header.sections[i].size)
 			continue;
 
 		string type;
 		BNSectionSemantics semantics = DefaultSectionSemantics;
-		switch (m_sections[i].flags & 0xff)
+		switch (header.sections[i].flags & 0xff)
 		{
 		case S_REGULAR:
-			if (m_sections[i].flags & S_ATTR_PURE_INSTRUCTIONS)
+			if (header.sections[i].flags & S_ATTR_PURE_INSTRUCTIONS)
 			{
 				type = "PURE_CODE";
 				semantics = ReadOnlyCodeSectionSemantics;
 			}
-			else if (m_sections[i].flags & S_ATTR_SOME_INSTRUCTIONS)
+			else if (header.sections[i].flags & S_ATTR_SOME_INSTRUCTIONS)
 			{
 				type = "CODE";
 				semantics = ReadOnlyCodeSectionSemantics;
@@ -1239,58 +1639,75 @@ bool MachoView::Init()
 			type = "UNKNOWN";
 			break;
 		}
-		if (i >= m_sectionNames.size())
+		if (i >= header.sectionNames.size())
 			break;
-		if (strncmp(m_sections[i].sectname, "__text", sizeof(m_sections[i].sectname)) == 0)
+		if (strncmp(header.sections[i].sectname, "__text", sizeof(header.sections[i].sectname)) == 0)
 			semantics = ReadOnlyCodeSectionSemantics;
-		if (strncmp(m_sections[i].sectname, "__const", sizeof(m_sections[i].sectname)) == 0)
+		if (strncmp(header.sections[i].sectname, "__const", sizeof(header.sections[i].sectname)) == 0)
 			semantics = ReadOnlyDataSectionSemantics;
-		if (strncmp(m_sections[i].sectname, "__data", sizeof(m_sections[i].sectname)) == 0)
+		if (strncmp(header.sections[i].sectname, "__data", sizeof(header.sections[i].sectname)) == 0)
 			semantics = ReadWriteDataSectionSemantics;
-		if (strncmp(m_sections[i].segname, "__DATA_CONST", sizeof(m_sections[i].segname)) == 0)
+		if (strncmp(header.sections[i].segname, "__DATA_CONST", sizeof(header.sections[i].segname)) == 0)
 			semantics = ReadOnlyDataSectionSemantics;
 
-		AddAutoSection(m_sectionNames[i], m_sections[i].addr, m_sections[i].size, semantics, type, m_sections[i].align);
+		AddAutoSection(header.sectionNames[i], header.sections[i].addr, header.sections[i].size, semantics, type, header.sections[i].align);
 	}
-
-	// Validate architecture
-	if (!m_arch)
+	if (isMainHeader)
 	{
-		// Parse only mode returns true, even if no arch support
+		// Validate architecture
+		if (!m_arch)
+		{
+			// Parse only mode returns true, even if no arch support
+			if (m_parseOnly)
+				return true;
+
+			bool is64Bit;
+			string archName = UniversalViewType::ArchitectureToString(m_archId, 0, is64Bit);
+			if (!archName.empty())
+				m_logger->LogError(
+					"Mach-O architecture '%s' is not explicitly supported. Try 'Open with Options' to manually select "
+				    "a compatible architecture.",
+					archName.c_str());
+			else
+				m_logger->LogError(
+					"Mach-O architecture 0x%x is not explicitly supported. Try 'Open with Options' to manually select "
+				    "a compatible architecture.",
+					m_archId);
+
+			return false;
+		}
+
+		// Apply architecture and platform
+		Ref<Platform> platform = m_plat ? m_plat : g_machoViewType->GetPlatform(0, m_arch);
+		if (!platform)
+			platform = m_arch->GetStandalonePlatform();
+
+		if (header.m_entryPoints.size() > 0)
+			platform = platform->GetAssociatedPlatformByAddress(header.m_entryPoints[0]);
+
+		if (settings && settings->Contains("loader.platform")) // handle overrides
+		{
+			Ref<Platform> platformOverride = Platform::GetByName(settings->Get<string>("loader.platform", this));
+			if (platformOverride)
+				platform = platformOverride;
+		}
+
+		SetDefaultPlatform(platform);
+		SetDefaultArchitecture(platform->GetArchitecture());
+
+		// Finished for parse only mode
 		if (m_parseOnly)
 			return true;
-
-		bool is64Bit;
-		string archName = UniversalViewType::ArchitectureToString(m_archId, 0, is64Bit);
-		if (!archName.empty())
-			m_logger->LogError("Mach-O architecture '%s' is not explicitly supported. Try 'Open with Options' to manually select a compatible architecture.", archName.c_str());
-		else
-			m_logger->LogError("Mach-O architecture 0x%x is not explicitly supported. Try 'Open with Options' to manually select a compatible architecture.", m_archId);
-
-		return false;
 	}
 
-	// Apply architecture and platform
+	BinaryReader reader(GetParentView());
+	reader.SetEndianness(m_endian);
+	reader.SetVirtualBase(m_universalImageOffset);
+	BinaryReader virtualReader(this);
+	virtualReader.SetEndianness(m_endian);
+
 	Ref<Platform> platform = m_plat ? m_plat : g_machoViewType->GetPlatform(0, m_arch);
-	if (!platform)
-		platform = m_arch->GetStandalonePlatform();
 
-	if (m_entryPoints.size() > 0)
-		platform = platform->GetAssociatedPlatformByAddress(m_entryPoints[0]);
-
-	if (settings && settings->Contains("loader.platform")) // handle overrides
-	{
-		Ref<Platform> platformOverride = Platform::GetByName(settings->Get<string>("loader.platform", this));
-		if (platformOverride)
-			platform = platformOverride;
-	}
-
-	SetDefaultPlatform(platform);
-	SetDefaultArchitecture(platform->GetArchitecture());
-
-	// Finished for parse only mode
-	if (m_parseOnly)
-		return true;
 
 	// parse thread starts section if available
 	bool rebaseThreadStarts = false;
@@ -1314,35 +1731,8 @@ bool MachoView::Init()
 	if (rebaseThreadStarts)
 		RebaseThreadStarts(virtualReader, threadStarts, stepMultiplier);
 
-	vector<Ref<Metadata>> libraries;
-	vector<Ref<Metadata>> libraryFound;
-	for (auto& l : m_dylibs)
-	{
-		libraries.push_back(new Metadata(string(l)));
-		Ref<TypeLibrary> typeLib = GetTypeLibrary(l);
-		if (!typeLib)
-		{
-			vector<Ref<TypeLibrary>> typeLibs = platform->GetTypeLibrariesByName(l);
-			if (typeLibs.size())
-			{
-				typeLib = typeLibs[0];
-				AddTypeLibrary(typeLib);
-
-				m_logger->LogDebug("mach-o: adding type library for '%s': %s (%s)",
-						l.c_str(), typeLib->GetName().c_str(), typeLib->GetGuid().c_str());
-			}
-		}
-
-		if (typeLib)
-			libraryFound.push_back(new Metadata(typeLib->GetName()));
-		else
-			libraryFound.push_back(new Metadata(string("")));
-	}
-	StoreMetadata("Libraries", new Metadata(libraries), true);
-	StoreMetadata("LibraryFound", new Metadata(libraryFound), true);
-
 	// Add module Init functions if they exist
-	for (const auto& moduleInitSection : m_moduleInitSections)
+	for (const auto& moduleInitSection : header.moduleInitSections)
 	{
 		// ignore mod_init functions that are rebased as part of thread starts
 		if (find(threadStarts.begin(), threadStarts.end(), moduleInitSection.offset) != threadStarts.end())
@@ -1361,8 +1751,38 @@ bool MachoView::Init()
 		}
 	}
 
+	if (isMainHeader)
+	{
+		vector<Ref<Metadata>> libraries;
+		vector<Ref<Metadata>> libraryFound;
+		for (auto& l : header.dylibs)
+		{
+			libraries.push_back(new Metadata(string(l)));
+			Ref<TypeLibrary> typeLib = GetTypeLibrary(l);
+			if (!typeLib)
+			{
+				vector<Ref<TypeLibrary>> typeLibs = platform->GetTypeLibrariesByName(l);
+				if (typeLibs.size())
+				{
+					typeLib = typeLibs[0];
+					AddTypeLibrary(typeLib);
+
+					m_logger->LogDebug("mach-o: adding type library for '%s': %s (%s)",
+						l.c_str(), typeLib->GetName().c_str(), typeLib->GetGuid().c_str());
+				}
+			}
+
+			if (typeLib)
+				libraryFound.push_back(new Metadata(typeLib->GetName()));
+			else
+				libraryFound.push_back(new Metadata(string("")));
+		}
+		StoreMetadata("Libraries", new Metadata(libraries), true);
+		StoreMetadata("LibraryFound", new Metadata(libraryFound), true);
+	}
+
 	bool first = true;
-	for (auto entry : m_entryPoints)
+	for (auto entry : header.m_entryPoints)
 	{
 		AddEntryPointForAnalysis(platform, entry);
 		if (first)
@@ -1376,11 +1796,11 @@ bool MachoView::Init()
 	try
 	{
 		// Handle indirect symbols
-		if (m_dysymtab.nindirectsyms)
+		if (header.dysymtab.nindirectsyms)
 		{
-			indirectSymbols.resize(m_dysymtab.nindirectsyms);
-			reader.Seek(m_dysymtab.indirectsymoff);
-			reader.Read(&indirectSymbols[0], m_dysymtab.nindirectsyms * sizeof(uint32_t));
+			indirectSymbols.resize(header.dysymtab.nindirectsyms);
+			reader.Seek(header.dysymtab.indirectsymoff);
+			reader.Read(&indirectSymbols[0], header.dysymtab.nindirectsyms * sizeof(uint32_t));
 		}
 	}
 	catch (ReadException&)
@@ -1395,7 +1815,7 @@ bool MachoView::Init()
 	{
 		// Add functions for all function symbols
 		m_logger->LogDebug("Parsing symbol table\n");
-		ParseSymbolTable(reader, m_symtab, indirectSymbols);
+		ParseSymbolTable(reader, header, header.symtab, indirectSymbols);
 	}
 	catch (std::exception&)
 	{
@@ -1415,18 +1835,20 @@ bool MachoView::Init()
 	if (parseFunctionStarts)
 	{
 		m_logger->LogDebug("Parsing function starts\n");
-		ParseFunctionStarts(platform);
+		if (header.functionStartsPresent)
+			ParseFunctionStarts(platform, header.textBase, header.functionStarts);
 	}
 
 	auto relocationHandler = m_arch->GetRelocationHandler("Mach-O");
 	if (relocationHandler)
 	{
+		// FIXME: this if statement block really needs to be a function
 		try
 		{
 			// For executables the relocations are attached to each of the sections
 			// In libraries these are zeroed out and collected in the dysymtab
 			vector<BNRelocationInfo> infoList;
-			for (auto& section : m_sections)
+			for (auto& section : header.sections)
 			{
 				if (section.nreloc == 0)
 					continue;
@@ -1450,7 +1872,7 @@ bool MachoView::Init()
 					BNRelocationInfo result;
 					memset(&result, 0, sizeof(result));
 					if (ParseRelocationEntry(info, sec->GetStart(), result))
-						infoList.push_back(result);
+							infoList.push_back(result);
 				}
 			}
 
@@ -1459,30 +1881,30 @@ bool MachoView::Init()
 				for (auto& reloc: infoList)
 				{
 					if (reloc.symbolIndex >= m_symbols.size())
-						continue;
+							continue;
 
 					// retrieve first symbol that is not a symbol relocation
 					auto symbols = GetSymbolsByName(m_symbols[reloc.symbolIndex]);
 					for (const auto& symbol : symbols)
 					{
-						if (symbol->GetAddress() == reloc.address)
-							continue;
-						DefineRelocation(m_arch, reloc, symbol, reloc.address);
-						break;
+							if (symbol->GetAddress() == reloc.address)
+								continue;
+							DefineRelocation(m_arch, reloc, symbol, reloc.address);
+							break;
 					}
 				}
 			}
 			infoList.clear();
 
 			// Handle local relocations for dynamic libraries
-			for (size_t i = 0; i < m_dysymtab.nlocrel; i++)
+			for (size_t i = 0; i < header.dysymtab.nlocrel; i++)
 			{
 				relocation_info info;
-				reader.Seek(m_dysymtab.locreloff + (i * sizeof(relocation_info)));
+				reader.Seek(header.dysymtab.locreloff + (i * sizeof(relocation_info)));
 				reader.Read(&info, sizeof(info));
 				BNRelocationInfo result;
 				memset(&result, 0, sizeof(result));
-				if (ParseRelocationEntry(info, m_relocationBase, result))
+				if (ParseRelocationEntry(info, header.relocationBase, result))
 					infoList.push_back(result);
 			}
 
@@ -1492,33 +1914,33 @@ bool MachoView::Init()
 				{
 					// TODO will matter once rebasing lands
 					if (!reloc.external)
-						continue;
+							continue;
 
 					if (reloc.symbolIndex >= m_symbols.size())
-						continue;
+							continue;
 
 					// retrieve first symbol that is not a symbol relocation
 					auto symbols = GetSymbolsByName(m_symbols[reloc.symbolIndex]);
 					for (const auto& symbol : symbols)
 					{
-						if (symbol->GetAddress() == reloc.address)
-							continue;
-						DefineRelocation(m_arch, reloc, symbol, reloc.address);
-						break;
+							if (symbol->GetAddress() == reloc.address)
+								continue;
+							DefineRelocation(m_arch, reloc, symbol, reloc.address);
+							break;
 					}
 				}
 			}
 			infoList.clear();
 
 			// Handle external relocations for dynamic libraries
-			for (size_t i = 0; i < m_dysymtab.nextrel; i++)
+			for (size_t i = 0; i < header.dysymtab.nextrel; i++)
 			{
 				relocation_info info;
-				reader.Seek(m_dysymtab.extreloff + (i * sizeof(relocation_info)));
+				reader.Seek(header.dysymtab.extreloff + (i * sizeof(relocation_info)));
 				reader.Read(&info, sizeof(info));
 				BNRelocationInfo result;
 				memset(&result, 0, sizeof(result));
-				if (ParseRelocationEntry(info, m_relocationBase, result))
+				if (ParseRelocationEntry(info, header.relocationBase, result))
 					infoList.push_back(result);
 			}
 
@@ -1528,19 +1950,19 @@ bool MachoView::Init()
 				{
 					// TODO will matter once rebasing lands
 					if (!reloc.external)
-						continue;
+							continue;
 
 					if (reloc.symbolIndex >= m_symbols.size())
-						continue;
+							continue;
 
 					// retrieve first symbol that is not a symbol relocation
 					auto symbols = GetSymbolsByName(m_symbols[reloc.symbolIndex]);
 					for (const auto& symbol : symbols)
 					{
-						if (symbol->GetAddress() == reloc.address)
-							continue;
-						DefineRelocation(m_arch, reloc, symbol, reloc.address);
-						break;
+							if (symbol->GetAddress() == reloc.address)
+								continue;
+							DefineRelocation(m_arch, reloc, symbol, reloc.address);
+							break;
 					}
 				}
 			}
@@ -1552,408 +1974,12 @@ bool MachoView::Init()
 		}
 	}
 
-	// Add Mach-O file header type info
-	EnumerationBuilder cpuTypeBuilder;
-	cpuTypeBuilder.AddMemberWithValue("CPU_TYPE_ANY", MACHO_CPU_TYPE_ANY);
-	cpuTypeBuilder.AddMemberWithValue("CPU_TYPE_VAX", MACHO_CPU_TYPE_VAX);
-	cpuTypeBuilder.AddMemberWithValue("CPU_TYPE_MC680x0", MACHO_CPU_TYPE_MC680x0);
-	cpuTypeBuilder.AddMemberWithValue("CPU_TYPE_X86", MACHO_CPU_TYPE_X86);
-	cpuTypeBuilder.AddMemberWithValue("CPU_TYPE_X86_64", MACHO_CPU_TYPE_X86_64);
-	cpuTypeBuilder.AddMemberWithValue("CPU_TYPE_MIPS", MACHO_CPU_TYPE_MIPS);
-	cpuTypeBuilder.AddMemberWithValue("CPU_TYPE_MC98000", MACHO_CPU_TYPE_MC98000);
-	cpuTypeBuilder.AddMemberWithValue("CPU_TYPE_HPPA", MACHO_CPU_TYPE_HPPA);
-	cpuTypeBuilder.AddMemberWithValue("CPU_TYPE_ARM", MACHO_CPU_TYPE_ARM);
-	cpuTypeBuilder.AddMemberWithValue("CPU_TYPE_ARM64", MACHO_CPU_TYPE_ARM64);
-	cpuTypeBuilder.AddMemberWithValue("CPU_TYPE_ARM64_32", MACHO_CPU_TYPE_ARM64_32);
-	cpuTypeBuilder.AddMemberWithValue("CPU_TYPE_MC88000", MACHO_CPU_TYPE_MC88000);
-	cpuTypeBuilder.AddMemberWithValue("CPU_TYPE_SPARC", MACHO_CPU_TYPE_SPARC);
-	cpuTypeBuilder.AddMemberWithValue("CPU_TYPE_I860", MACHO_CPU_TYPE_I860);
-	cpuTypeBuilder.AddMemberWithValue("CPU_TYPE_ALPHA", MACHO_CPU_TYPE_ALPHA);
-	cpuTypeBuilder.AddMemberWithValue("CPU_TYPE_POWERPC", MACHO_CPU_TYPE_POWERPC);
-	cpuTypeBuilder.AddMemberWithValue("CPU_TYPE_POWERPC64", MACHO_CPU_TYPE_POWERPC64);
-	Ref<Enumeration> cpuTypeEnum = cpuTypeBuilder.Finalize();
-
-	Ref<Type> cpuTypeEnumType = Type::EnumerationType(nullptr, cpuTypeEnum, 4, false);
-	string cpuTypeEnumName = "cpu_type_t";
-	string cpuTypeEnumId = Type::GenerateAutoTypeId("macho", cpuTypeEnumName);
-	QualifiedName cpuTypeEnumQualName = DefineType(cpuTypeEnumId, cpuTypeEnumName, cpuTypeEnumType);
-
-	EnumerationBuilder fileTypeBuilder;
-	fileTypeBuilder.AddMemberWithValue("MH_OBJECT", MH_OBJECT);
-	fileTypeBuilder.AddMemberWithValue("MH_EXECUTE", MH_EXECUTE);
-	fileTypeBuilder.AddMemberWithValue("MH_FVMLIB", MH_FVMLIB);
-	fileTypeBuilder.AddMemberWithValue("MH_CORE", MH_CORE);
-	fileTypeBuilder.AddMemberWithValue("MH_PRELOAD", MH_PRELOAD);
-	fileTypeBuilder.AddMemberWithValue("MH_DYLIB", MH_DYLIB);
-	fileTypeBuilder.AddMemberWithValue("MH_DYLINKER", MH_DYLINKER);
-	fileTypeBuilder.AddMemberWithValue("MH_BUNDLE", MH_BUNDLE);
-	fileTypeBuilder.AddMemberWithValue("MH_DYLIB_STUB", MH_DYLIB_STUB);
-	fileTypeBuilder.AddMemberWithValue("MH_DSYM", MH_DSYM);
-	fileTypeBuilder.AddMemberWithValue("MH_KEXT_BUNDLE", MH_KEXT_BUNDLE);
-	Ref<Enumeration> fileTypeEnum = fileTypeBuilder.Finalize();
-
-	Ref<Type> fileTypeEnumType = Type::EnumerationType(nullptr, fileTypeEnum, 4, false);
-	string fileTypeEnumName = "file_type_t";
-	string fileTypeEnumId = Type::GenerateAutoTypeId("macho", fileTypeEnumName);
-	QualifiedName fileTypeEnumQualName = DefineType(fileTypeEnumId, fileTypeEnumName, fileTypeEnumType);
-
-	EnumerationBuilder flagsTypeBuilder;
-	flagsTypeBuilder.AddMemberWithValue("MH_NOUNDEFS", MH_NOUNDEFS);
-	flagsTypeBuilder.AddMemberWithValue("MH_INCRLINK", MH_INCRLINK);
-	flagsTypeBuilder.AddMemberWithValue("MH_DYLDLINK", MH_DYLDLINK);
-	flagsTypeBuilder.AddMemberWithValue("MH_BINDATLOAD", MH_BINDATLOAD);
-	flagsTypeBuilder.AddMemberWithValue("MH_PREBOUND", MH_PREBOUND);
-	flagsTypeBuilder.AddMemberWithValue("MH_SPLIT_SEGS", MH_SPLIT_SEGS);
-	flagsTypeBuilder.AddMemberWithValue("MH_LAZY_INIT", MH_LAZY_INIT);
-	flagsTypeBuilder.AddMemberWithValue("MH_TWOLEVEL", MH_TWOLEVEL);
-	flagsTypeBuilder.AddMemberWithValue("MH_FORCE_FLAT", MH_FORCE_FLAT);
-	flagsTypeBuilder.AddMemberWithValue("MH_NOMULTIDEFS", MH_NOMULTIDEFS);
-	flagsTypeBuilder.AddMemberWithValue("MH_NOFIXPREBINDING", MH_NOFIXPREBINDING);
-	flagsTypeBuilder.AddMemberWithValue("MH_PREBINDABLE", MH_PREBINDABLE);
-	flagsTypeBuilder.AddMemberWithValue("MH_ALLMODSBOUND", MH_ALLMODSBOUND);
-	flagsTypeBuilder.AddMemberWithValue("MH_SUBSECTIONS_VIA_SYMBOLS", MH_SUBSECTIONS_VIA_SYMBOLS);
-	flagsTypeBuilder.AddMemberWithValue("MH_CANONICAL", MH_CANONICAL);
-	flagsTypeBuilder.AddMemberWithValue("MH_WEAK_DEFINES", MH_WEAK_DEFINES);
-	flagsTypeBuilder.AddMemberWithValue("MH_BINDS_TO_WEAK", MH_BINDS_TO_WEAK);
-	flagsTypeBuilder.AddMemberWithValue("MH_ALLOW_STACK_EXECUTION", MH_ALLOW_STACK_EXECUTION);
-	flagsTypeBuilder.AddMemberWithValue("MH_ROOT_SAFE", MH_ROOT_SAFE);
-	flagsTypeBuilder.AddMemberWithValue("MH_SETUID_SAFE", MH_SETUID_SAFE);
-	flagsTypeBuilder.AddMemberWithValue("MH_NO_REEXPORTED_DYLIBS", MH_NO_REEXPORTED_DYLIBS);
-	flagsTypeBuilder.AddMemberWithValue("MH_PIE", MH_PIE);
-	flagsTypeBuilder.AddMemberWithValue("MH_DEAD_STRIPPABLE_DYLIB", MH_DEAD_STRIPPABLE_DYLIB);
-	flagsTypeBuilder.AddMemberWithValue("MH_HAS_TLV_DESCRIPTORS", MH_HAS_TLV_DESCRIPTORS);
-	flagsTypeBuilder.AddMemberWithValue("MH_NO_HEAP_EXECUTION", MH_NO_HEAP_EXECUTION);
-	flagsTypeBuilder.AddMemberWithValue("MH_APP_EXTENSION_SAFE", _MH_APP_EXTENSION_SAFE);
-	flagsTypeBuilder.AddMemberWithValue("MH_NLIST_OUTOFSYNC_WITH_DYLDINFO", _MH_NLIST_OUTOFSYNC_WITH_DYLDINFO);
-	flagsTypeBuilder.AddMemberWithValue("MH_SIM_SUPPORT", _MH_SIM_SUPPORT);
-	flagsTypeBuilder.AddMemberWithValue("MH_DYLIB_IN_CACHE", _MH_DYLIB_IN_CACHE);
-	Ref<Enumeration> flagsTypeEnum = flagsTypeBuilder.Finalize();
-
-	Ref<Type> flagsTypeEnumType = Type::EnumerationType(nullptr, flagsTypeEnum, 4, false);
-	string flagsTypeEnumName = "flags_type_t";
-	string flagsTypeEnumId = Type::GenerateAutoTypeId("macho", flagsTypeEnumName);
-	QualifiedName flagsTypeEnumQualName = DefineType(flagsTypeEnumId, flagsTypeEnumName, flagsTypeEnumType);
-
-	StructureBuilder machoHeaderBuilder;
-	machoHeaderBuilder.AddMember(Type::IntegerType(4, false), "magic");
-	machoHeaderBuilder.AddMember(Type::NamedType(this, cpuTypeEnumQualName), "cputype");
-	machoHeaderBuilder.AddMember(Type::IntegerType(4, false), "cpusubtype");
-	machoHeaderBuilder.AddMember(Type::NamedType(this, fileTypeEnumQualName), "filetype");
-	machoHeaderBuilder.AddMember(Type::IntegerType(4, false), "ncmds");
-	machoHeaderBuilder.AddMember(Type::IntegerType(4, false), "sizeofcmds");
-	machoHeaderBuilder.AddMember(Type::NamedType(this, flagsTypeEnumQualName), "flags");
-	if (m_addressSize == 8)
-		machoHeaderBuilder.AddMember(Type::IntegerType(4, false), "reserved");
-	Ref<Structure> machoHeaderStruct = machoHeaderBuilder.Finalize();
-	QualifiedName headerName = (m_addressSize == 8) ? string("mach_header_64") : string("mach_header");
-
-	string headerTypeId = Type::GenerateAutoTypeId("macho", headerName);
-	Ref<Type> machoHeaderType = Type::StructureType(machoHeaderStruct);
-	QualifiedName headerQualName = DefineType(headerTypeId, headerName, machoHeaderType);
-
-	EnumerationBuilder cmdTypeBuilder;
-	cmdTypeBuilder.AddMemberWithValue("LC_REQ_DYLD", LC_REQ_DYLD);
-	cmdTypeBuilder.AddMemberWithValue("LC_SEGMENT", LC_SEGMENT);
-	cmdTypeBuilder.AddMemberWithValue("LC_SYMTAB", LC_SYMTAB);
-	cmdTypeBuilder.AddMemberWithValue("LC_SYMSEG",LC_SYMSEG);
-	cmdTypeBuilder.AddMemberWithValue("LC_THREAD", LC_THREAD);
-	cmdTypeBuilder.AddMemberWithValue("LC_UNIXTHREAD", LC_UNIXTHREAD);
-	cmdTypeBuilder.AddMemberWithValue("LC_LOADFVMLIB", LC_LOADFVMLIB);
-	cmdTypeBuilder.AddMemberWithValue("LC_IDFVMLIB", LC_IDFVMLIB);
-	cmdTypeBuilder.AddMemberWithValue("LC_IDENT", LC_IDENT);
-	cmdTypeBuilder.AddMemberWithValue("LC_FVMFILE", LC_FVMFILE);
-	cmdTypeBuilder.AddMemberWithValue("LC_PREPAGE", LC_PREPAGE);
-	cmdTypeBuilder.AddMemberWithValue("LC_DYSYMTAB", LC_DYSYMTAB);
-	cmdTypeBuilder.AddMemberWithValue("LC_LOAD_DYLIB", LC_LOAD_DYLIB);
-	cmdTypeBuilder.AddMemberWithValue("LC_ID_DYLIB", LC_ID_DYLIB);
-	cmdTypeBuilder.AddMemberWithValue("LC_LOAD_DYLINKER", LC_LOAD_DYLINKER);
-	cmdTypeBuilder.AddMemberWithValue("LC_ID_DYLINKER", LC_ID_DYLINKER);
-	cmdTypeBuilder.AddMemberWithValue("LC_PREBOUND_DYLIB", LC_PREBOUND_DYLIB);
-	cmdTypeBuilder.AddMemberWithValue("LC_ROUTINES", LC_ROUTINES);
-	cmdTypeBuilder.AddMemberWithValue("LC_SUB_FRAMEWORK", LC_SUB_FRAMEWORK);
-	cmdTypeBuilder.AddMemberWithValue("LC_SUB_UMBRELLA", LC_SUB_UMBRELLA);
-	cmdTypeBuilder.AddMemberWithValue("LC_SUB_CLIENT", LC_SUB_CLIENT);
-	cmdTypeBuilder.AddMemberWithValue("LC_SUB_LIBRARY", LC_SUB_LIBRARY);
-	cmdTypeBuilder.AddMemberWithValue("LC_TWOLEVEL_HINTS", LC_TWOLEVEL_HINTS);
-	cmdTypeBuilder.AddMemberWithValue("LC_PREBIND_CKSUM", LC_PREBIND_CKSUM);
-	cmdTypeBuilder.AddMemberWithValue("LC_LOAD_WEAK_DYLIB", LC_LOAD_WEAK_DYLIB);//       (0x18 | LC_REQ_DYLD)
-	cmdTypeBuilder.AddMemberWithValue("LC_SEGMENT_64", LC_SEGMENT_64);
-	cmdTypeBuilder.AddMemberWithValue("LC_ROUTINES_64", LC_ROUTINES_64);
-	cmdTypeBuilder.AddMemberWithValue("LC_UUID", LC_UUID);
-	cmdTypeBuilder.AddMemberWithValue("LC_RPATH", LC_RPATH);//                 (0x1c | LC_REQ_DYLD)
-	cmdTypeBuilder.AddMemberWithValue("LC_CODE_SIGNATURE", LC_CODE_SIGNATURE);
-	cmdTypeBuilder.AddMemberWithValue("LC_SEGMENT_SPLIT_INFO", LC_SEGMENT_SPLIT_INFO);
-	cmdTypeBuilder.AddMemberWithValue("LC_REEXPORT_DYLIB", LC_REEXPORT_DYLIB);//        (0x1f | LC_REQ_DYLD)
-	cmdTypeBuilder.AddMemberWithValue("LC_LAZY_LOAD_DYLIB", LC_LAZY_LOAD_DYLIB);
-	cmdTypeBuilder.AddMemberWithValue("LC_ENCRYPTION_INFO", LC_ENCRYPTION_INFO);
-	cmdTypeBuilder.AddMemberWithValue("LC_DYLD_INFO", LC_DYLD_INFO);
-	cmdTypeBuilder.AddMemberWithValue("LC_DYLD_INFO_ONLY", LC_DYLD_INFO_ONLY);//        (0x22 | LC_REQ_DYLD)
-	cmdTypeBuilder.AddMemberWithValue("LC_LOAD_UPWARD_DYLIB", LC_LOAD_UPWARD_DYLIB);//     (0x23 | LC_REQ_DYLD)
-	cmdTypeBuilder.AddMemberWithValue("LC_VERSION_MIN_MACOSX", LC_VERSION_MIN_MACOSX);
-	cmdTypeBuilder.AddMemberWithValue("LC_VERSION_MIN_IPHONEOS", LC_VERSION_MIN_IPHONEOS);
-	cmdTypeBuilder.AddMemberWithValue("LC_FUNCTION_STARTS", LC_FUNCTION_STARTS);
-	cmdTypeBuilder.AddMemberWithValue("LC_DYLD_ENVIRONMENT", LC_DYLD_ENVIRONMENT);
-	cmdTypeBuilder.AddMemberWithValue("LC_MAIN", LC_MAIN);//                  (0x28 | LC_REQ_DYLD)
-	cmdTypeBuilder.AddMemberWithValue("LC_DATA_IN_CODE", LC_DATA_IN_CODE);
-	cmdTypeBuilder.AddMemberWithValue("LC_SOURCE_VERSION", LC_SOURCE_VERSION);
-	cmdTypeBuilder.AddMemberWithValue("LC_DYLIB_CODE_SIGN_DRS", LC_DYLIB_CODE_SIGN_DRS);
-	cmdTypeBuilder.AddMemberWithValue("LC_ENCRYPTION_INFO_64", _LC_ENCRYPTION_INFO_64);
-	cmdTypeBuilder.AddMemberWithValue("LC_LINKER_OPTION", _LC_LINKER_OPTION);
-	cmdTypeBuilder.AddMemberWithValue("LC_LINKER_OPTIMIZATION_HINT", _LC_LINKER_OPTIMIZATION_HINT);
-	cmdTypeBuilder.AddMemberWithValue("LC_VERSION_MIN_TVOS", _LC_VERSION_MIN_TVOS);
-	cmdTypeBuilder.AddMemberWithValue("LC_VERSION_MIN_WATCHOS", LC_VERSION_MIN_WATCHOS);
-	cmdTypeBuilder.AddMemberWithValue("LC_NOTE", LC_NOTE);
-	cmdTypeBuilder.AddMemberWithValue("LC_BUILD_VERSION", LC_BUILD_VERSION);
-	cmdTypeBuilder.AddMemberWithValue("LC_DYLD_EXPORTS_TRIE", LC_DYLD_EXPORTS_TRIE);
-	cmdTypeBuilder.AddMemberWithValue("LC_DYLD_CHAINED_FIXUPS", LC_DYLD_CHAINED_FIXUPS);
-	Ref<Enumeration> cmdTypeEnum = cmdTypeBuilder.Finalize();
-
-	Ref<Type> cmdTypeEnumType = Type::EnumerationType(nullptr, cmdTypeEnum, 4, false);
-	string cmdTypeEnumName = "load_command_type_t";
-	string cmdTypeEnumId = Type::GenerateAutoTypeId("macho", cmdTypeEnumName);
-	QualifiedName cmdTypeEnumQualName = DefineType(cmdTypeEnumId, cmdTypeEnumName, cmdTypeEnumType);
-
-	StructureBuilder loadCommandBuilder;
-	loadCommandBuilder.AddMember(Type::NamedType(this, cmdTypeEnumQualName), "cmd");
-	loadCommandBuilder.AddMember(Type::IntegerType(4, false), "cmdsize");
-	Ref<Structure> loadCommandStruct = loadCommandBuilder.Finalize();
-	QualifiedName loadCommandName = string("load_command");
-	string loadCommandTypeId = Type::GenerateAutoTypeId("macho", loadCommandName);
-	Ref<Type> loadCommandType = Type::StructureType(loadCommandStruct);
-	QualifiedName loadCommandQualName = DefineType(loadCommandTypeId, loadCommandName, loadCommandType);
-
-	EnumerationBuilder protTypeBuilder;
-	protTypeBuilder.AddMemberWithValue("VM_PROT_NONE", MACHO_VM_PROT_NONE);
-	protTypeBuilder.AddMemberWithValue("VM_PROT_READ", MACHO_VM_PROT_READ);
-	protTypeBuilder.AddMemberWithValue("VM_PROT_WRITE", MACHO_VM_PROT_WRITE);
-	protTypeBuilder.AddMemberWithValue("VM_PROT_EXECUTE", MACHO_VM_PROT_EXECUTE);
-	// protTypeBuilder.AddMemberWithValue("VM_PROT_DEFAULT", MACHO_VM_PROT_DEFAULT);
-	// protTypeBuilder.AddMemberWithValue("VM_PROT_ALL", MACHO_VM_PROT_ALL);
-	protTypeBuilder.AddMemberWithValue("VM_PROT_NO_CHANGE", MACHO_VM_PROT_NO_CHANGE);
-	protTypeBuilder.AddMemberWithValue("VM_PROT_COPY_OR_WANTS_COPY", MACHO_VM_PROT_COPY);
-	//protTypeBuilder.AddMemberWithValue("VM_PROT_WANTS_COPY", MACHO_VM_PROT_WANTS_COPY);
-	Ref<Enumeration> protTypeEnum = protTypeBuilder.Finalize();
-
-	Ref<Type> protTypeEnumType = Type::EnumerationType(nullptr, protTypeEnum, 4, false);
-	string protTypeEnumName = "vm_prot_t";
-	string protTypeEnumId = Type::GenerateAutoTypeId("macho", protTypeEnumName);
-	QualifiedName protTypeEnumQualName = DefineType(protTypeEnumId, protTypeEnumName, protTypeEnumType);
-
-	EnumerationBuilder segFlagsTypeBuilder;
-	segFlagsTypeBuilder.AddMemberWithValue("SG_HIGHVM", SG_HIGHVM);
-	segFlagsTypeBuilder.AddMemberWithValue("SG_FVMLIB", SG_FVMLIB);
-	segFlagsTypeBuilder.AddMemberWithValue("SG_NORELOC", SG_NORELOC);
-	segFlagsTypeBuilder.AddMemberWithValue("SG_PROTECTED_VERSION_1", SG_PROTECTED_VERSION_1);
-	Ref<Enumeration> segFlagsTypeEnum = segFlagsTypeBuilder.Finalize();
-
-	Ref<Type> segFlagsTypeEnumType = Type::EnumerationType(nullptr, segFlagsTypeEnum, 4, false);
-	string segFlagsTypeEnumName = "sg_flags_t";
-	string segFlagsTypeEnumId = Type::GenerateAutoTypeId("macho", segFlagsTypeEnumName);
-	QualifiedName segFlagsTypeEnumQualName = DefineType(segFlagsTypeEnumId, segFlagsTypeEnumName, segFlagsTypeEnumType);
-
-	StructureBuilder loadSegmentCommandBuilder;
-	loadSegmentCommandBuilder.AddMember(Type::NamedType(this, cmdTypeEnumQualName), "cmd");
-	loadSegmentCommandBuilder.AddMember(Type::IntegerType(4, false), "cmdsize");
-	loadSegmentCommandBuilder.AddMember(Type::ArrayType(Type::IntegerType(1, true), 16), "segname");
-	loadSegmentCommandBuilder.AddMember(Type::IntegerType(4, false), "vmaddr");
-	loadSegmentCommandBuilder.AddMember(Type::IntegerType(4, false), "vmsize");
-	loadSegmentCommandBuilder.AddMember(Type::IntegerType(4, false), "fileoff");
-	loadSegmentCommandBuilder.AddMember(Type::IntegerType(4, false), "filesize");
-	loadSegmentCommandBuilder.AddMember(Type::NamedType(this, protTypeEnumQualName), "maxprot");
-	loadSegmentCommandBuilder.AddMember(Type::NamedType(this, protTypeEnumQualName), "initprot");
-	loadSegmentCommandBuilder.AddMember(Type::IntegerType(4, false), "nsects");
-	loadSegmentCommandBuilder.AddMember(Type::NamedType(this, segFlagsTypeEnumQualName), "flags");
-	Ref<Structure> loadSegmentCommandStruct = loadSegmentCommandBuilder.Finalize();
-	QualifiedName loadSegmentCommandName = string("segment_command");
-	string loadSegmentCommandTypeId = Type::GenerateAutoTypeId("macho", loadSegmentCommandName);
-	Ref<Type> loadSegmentCommandType = Type::StructureType(loadSegmentCommandStruct);
-	QualifiedName loadSegmentCommandQualName = DefineType(loadSegmentCommandTypeId, loadSegmentCommandName, loadSegmentCommandType);
-
-	StructureBuilder loadSegmentCommand64Builder;
-	loadSegmentCommand64Builder.AddMember(Type::NamedType(this, cmdTypeEnumQualName), "cmd");
-	loadSegmentCommand64Builder.AddMember(Type::IntegerType(4, false), "cmdsize");
-	loadSegmentCommand64Builder.AddMember(Type::ArrayType(Type::IntegerType(1, true), 16), "segname");
-	loadSegmentCommand64Builder.AddMember(Type::IntegerType(8, false), "vmaddr");
-	loadSegmentCommand64Builder.AddMember(Type::IntegerType(8, false), "vmsize");
-	loadSegmentCommand64Builder.AddMember(Type::IntegerType(8, false), "fileoff");
-	loadSegmentCommand64Builder.AddMember(Type::IntegerType(8, false), "filesize");
-	loadSegmentCommand64Builder.AddMember(Type::NamedType(this, protTypeEnumQualName), "maxprot");
-	loadSegmentCommand64Builder.AddMember(Type::NamedType(this, protTypeEnumQualName), "initprot");
-	loadSegmentCommand64Builder.AddMember(Type::IntegerType(4, false), "nsects");
-	loadSegmentCommand64Builder.AddMember(Type::NamedType(this, segFlagsTypeEnumQualName), "flags");
-	Ref<Structure> loadSegmentCommand64Struct = loadSegmentCommand64Builder.Finalize();
-	QualifiedName loadSegment64CommandName = string("segment_command_64");
-	string loadSegment64CommandTypeId = Type::GenerateAutoTypeId("macho", loadSegment64CommandName);
-	Ref<Type> loadSegment64CommandType = Type::StructureType(loadSegmentCommand64Struct);
-	QualifiedName loadSegment64CommandQualName = DefineType(loadSegment64CommandTypeId, loadSegment64CommandName, loadSegment64CommandType);
-
-	StructureBuilder sectionBuilder;
-	sectionBuilder.AddMember(Type::ArrayType(Type::IntegerType(1, true), 16), "sectname");
-	sectionBuilder.AddMember(Type::ArrayType(Type::IntegerType(1, true), 16), "segname");
-	sectionBuilder.AddMember(Type::IntegerType(4, false), "addr");
-	sectionBuilder.AddMember(Type::IntegerType(4, false), "size");
-	sectionBuilder.AddMember(Type::IntegerType(4, false), "offset");
-	sectionBuilder.AddMember(Type::IntegerType(4, false), "align");
-	sectionBuilder.AddMember(Type::IntegerType(4, false), "reloff");
-	sectionBuilder.AddMember(Type::IntegerType(4, false), "nreloc");
-	sectionBuilder.AddMember(Type::IntegerType(4, false), "flags");
-	sectionBuilder.AddMember(Type::IntegerType(4, false), "reserved1");
-	sectionBuilder.AddMember(Type::IntegerType(4, false), "reserved2");
-	Ref<Structure> sectionStruct = sectionBuilder.Finalize();
-	QualifiedName sectionName = string("section");
-	string sectionTypeId = Type::GenerateAutoTypeId("macho", sectionName);
-	Ref<Type> sectionType = Type::StructureType(sectionStruct);
-	QualifiedName sectionQualName = DefineType(sectionTypeId, sectionName, sectionType);
-
-	StructureBuilder section64Builder;
-	section64Builder.AddMember(Type::ArrayType(Type::IntegerType(1, true), 16), "sectname");
-	section64Builder.AddMember(Type::ArrayType(Type::IntegerType(1, true), 16), "segname");
-	section64Builder.AddMember(Type::IntegerType(8, false), "addr");
-	section64Builder.AddMember(Type::IntegerType(8, false), "size");
-	section64Builder.AddMember(Type::IntegerType(4, false), "offset");
-	section64Builder.AddMember(Type::IntegerType(4, false), "align");
-	section64Builder.AddMember(Type::IntegerType(4, false), "reloff");
-	section64Builder.AddMember(Type::IntegerType(4, false), "nreloc");
-	section64Builder.AddMember(Type::IntegerType(4, false), "flags");
-	section64Builder.AddMember(Type::IntegerType(4, false), "reserved1");
-	section64Builder.AddMember(Type::IntegerType(4, false), "reserved2");
-	section64Builder.AddMember(Type::IntegerType(4, false), "reserved3");
-	Ref<Structure> section64Struct = section64Builder.Finalize();
-	QualifiedName section64Name = string("section_64");
-	string section64TypeId = Type::GenerateAutoTypeId("macho", section64Name);
-	Ref<Type> section64Type = Type::StructureType(section64Struct);
-	QualifiedName section64QualName = DefineType(section64TypeId, section64Name, section64Type);
-
-	StructureBuilder symtabBuilder;
-	symtabBuilder.AddMember(Type::NamedType(this, cmdTypeEnumQualName), "cmd");
-	symtabBuilder.AddMember(Type::IntegerType(4, false), "cmdsize");
-	symtabBuilder.AddMember(Type::IntegerType(4, false), "symoff");
-	symtabBuilder.AddMember(Type::IntegerType(4, false), "nsyms");
-	symtabBuilder.AddMember(Type::IntegerType(4, false), "stroff");
-	symtabBuilder.AddMember(Type::IntegerType(4, false), "strsize");
-	Ref<Structure> symtabStruct = symtabBuilder.Finalize();
-	QualifiedName symtabName = string("symtab");
-	string symtabTypeId = Type::GenerateAutoTypeId("macho", symtabName);
-	Ref<Type> symtabType = Type::StructureType(symtabStruct);
-	QualifiedName symtabQualName = DefineType(symtabTypeId, symtabName, symtabType);
-
-	StructureBuilder dynsymtabBuilder;
-	dynsymtabBuilder.AddMember(Type::NamedType(this, cmdTypeEnumQualName), "cmd");
-	dynsymtabBuilder.AddMember(Type::IntegerType(4, false), "cmdsize");
-	dynsymtabBuilder.AddMember(Type::IntegerType(4, false), "ilocalsym");
-	dynsymtabBuilder.AddMember(Type::IntegerType(4, false), "nlocalsym");
-	dynsymtabBuilder.AddMember(Type::IntegerType(4, false), "iextdefsym");
-	dynsymtabBuilder.AddMember(Type::IntegerType(4, false), "nextdefsym");
-	dynsymtabBuilder.AddMember(Type::IntegerType(4, false), "iundefsym");
-	dynsymtabBuilder.AddMember(Type::IntegerType(4, false), "nundefsym");
-	dynsymtabBuilder.AddMember(Type::IntegerType(4, false), "tocoff");
-	dynsymtabBuilder.AddMember(Type::IntegerType(4, false), "ntoc");
-	dynsymtabBuilder.AddMember(Type::IntegerType(4, false), "modtaboff");
-	dynsymtabBuilder.AddMember(Type::IntegerType(4, false), "nmodtab");
-	dynsymtabBuilder.AddMember(Type::IntegerType(4, false), "extrefsymoff");
-	dynsymtabBuilder.AddMember(Type::IntegerType(4, false), "nextrefsyms");
-	dynsymtabBuilder.AddMember(Type::IntegerType(4, false), "indirectsymoff");
-	dynsymtabBuilder.AddMember(Type::IntegerType(4, false), "nindirectsyms");
-	dynsymtabBuilder.AddMember(Type::IntegerType(4, false), "extreloff");
-	dynsymtabBuilder.AddMember(Type::IntegerType(4, false), "nextrel");
-	dynsymtabBuilder.AddMember(Type::IntegerType(4, false), "locreloff");
-	dynsymtabBuilder.AddMember(Type::IntegerType(4, false), "nlocrel");
-	Ref<Structure> dynsymtabStruct = dynsymtabBuilder.Finalize();
-	QualifiedName dynsymtabName = string("dynsymtab");
-	string dynsymtabTypeId = Type::GenerateAutoTypeId("macho", dynsymtabName);
-	Ref<Type> dynsymtabType = Type::StructureType(dynsymtabStruct);
-	QualifiedName dynsymtabQualName = DefineType(dynsymtabTypeId, dynsymtabName, dynsymtabType);
-
-	StructureBuilder uuidBuilder;
-	uuidBuilder.AddMember(Type::NamedType(this, cmdTypeEnumQualName), "cmd");
-	uuidBuilder.AddMember(Type::IntegerType(4, false), "cmdsize");
-	uuidBuilder.AddMember(Type::ArrayType(Type::IntegerType(1, false), 16), "uuid");
-	Ref<Structure> uuidStruct = uuidBuilder.Finalize();
-	QualifiedName uuidName = string("uuid");
-	string uuidTypeId = Type::GenerateAutoTypeId("macho", uuidName);
-	Ref<Type> uuidType = Type::StructureType(uuidStruct);
-	QualifiedName uuidQualName = DefineType(uuidTypeId, uuidName, uuidType);
-
-	StructureBuilder linkeditDataBuilder;
-	linkeditDataBuilder.AddMember(Type::NamedType(this, cmdTypeEnumQualName), "cmd");
-	linkeditDataBuilder.AddMember(Type::IntegerType(4, false), "cmdsize");
-	linkeditDataBuilder.AddMember(Type::IntegerType(4, false), "dataoff");
-	linkeditDataBuilder.AddMember(Type::IntegerType(4, false), "datasize");
-	Ref<Structure> linkeditDataStruct = linkeditDataBuilder.Finalize();
-	QualifiedName linkeditDataName = string("linkedit_data");
-	string linkeditDataTypeId = Type::GenerateAutoTypeId("macho", linkeditDataName);
-	Ref<Type> linkeditDataType = Type::StructureType(linkeditDataStruct);
-	QualifiedName linkeditDataQualName = DefineType(linkeditDataTypeId, linkeditDataName, linkeditDataType);
-
-	StructureBuilder encryptionInfoBuilder;
-	encryptionInfoBuilder.AddMember(Type::NamedType(this, cmdTypeEnumQualName), "cmd");
-	encryptionInfoBuilder.AddMember(Type::IntegerType(4, false), "cmdsize");
-	encryptionInfoBuilder.AddMember(Type::IntegerType(4, false), "cryptoff");
-	encryptionInfoBuilder.AddMember(Type::IntegerType(4, false), "cryptsize");
-	encryptionInfoBuilder.AddMember(Type::IntegerType(4, false), "cryptid");
-	Ref<Structure> encryptionInfoStruct = encryptionInfoBuilder.Finalize();
-	QualifiedName encryptionInfoName = string("encryption_info");
-	string encryptionInfoTypeId = Type::GenerateAutoTypeId("macho", encryptionInfoName);
-	Ref<Type> encryptionInfoType = Type::StructureType(encryptionInfoStruct);
-	QualifiedName encryptionInfoQualName = DefineType(encryptionInfoTypeId, encryptionInfoName, encryptionInfoType);
-
-	StructureBuilder versionMinBuilder;
-	versionMinBuilder.AddMember(Type::NamedType(this, cmdTypeEnumQualName), "cmd");
-	versionMinBuilder.AddMember(Type::IntegerType(4, false), "cmdsize");
-	versionMinBuilder.AddMember(Type::IntegerType(4, false), "version");
-	versionMinBuilder.AddMember(Type::IntegerType(4, false), "sdk");
-	Ref<Structure> versionMinStruct = versionMinBuilder.Finalize();
-	QualifiedName versionMinName = string("version_min");
-	string versionMinTypeId = Type::GenerateAutoTypeId("macho", versionMinName);
-	Ref<Type> versionMinType = Type::StructureType(versionMinStruct);
-	QualifiedName versionMinQualName = DefineType(versionMinTypeId, versionMinName, versionMinType);
-
-	StructureBuilder dyldInfoBuilder;
-	dyldInfoBuilder.AddMember(Type::NamedType(this, cmdTypeEnumQualName), "cmd");
-	dyldInfoBuilder.AddMember(Type::IntegerType(4, false), "cmdsize");
-	dyldInfoBuilder.AddMember(Type::IntegerType(4, false), "rebase_off");
-	dyldInfoBuilder.AddMember(Type::IntegerType(4, false), "rebase_size");
-	dyldInfoBuilder.AddMember(Type::IntegerType(4, false), "bind_off");
-	dyldInfoBuilder.AddMember(Type::IntegerType(4, false), "bind_size");
-	dyldInfoBuilder.AddMember(Type::IntegerType(4, false), "weak_bind_off");
-	dyldInfoBuilder.AddMember(Type::IntegerType(4, false), "weak_bind_size");
-	dyldInfoBuilder.AddMember(Type::IntegerType(4, false), "lazy_bind_off");
-	dyldInfoBuilder.AddMember(Type::IntegerType(4, false), "lazy_bind_size");
-	dyldInfoBuilder.AddMember(Type::IntegerType(4, false), "export_off");
-	dyldInfoBuilder.AddMember(Type::IntegerType(4, false), "export_size");
-	Ref<Structure> dyldInfoStruct = dyldInfoBuilder.Finalize();
-	QualifiedName dyldInfoName = string("dyld_info");
-	string dyldInfoTypeId = Type::GenerateAutoTypeId("macho", dyldInfoName);
-	Ref<Type> dyldInfoType = Type::StructureType(dyldInfoStruct);
-	QualifiedName dyldInfoQualName = DefineType(dyldInfoTypeId, dyldInfoName, dyldInfoType);
-
-	StructureBuilder dylibBuilder;
-	dylibBuilder.AddMember(Type::IntegerType(4, false), "name");
-	dylibBuilder.AddMember(Type::IntegerType(4, false), "timestamp");
-	dylibBuilder.AddMember(Type::IntegerType(4, false), "current_version");
-	dylibBuilder.AddMember(Type::IntegerType(4, false), "compatibility_version");
-	Ref<Structure> dylibStruct = dylibBuilder.Finalize();
-	QualifiedName dylibName = string("dylib");
-	string dylibTypeId = Type::GenerateAutoTypeId("macho", dylibName);
-	Ref<Type> dylibType = Type::StructureType(dylibStruct);
-	QualifiedName dylibQualName = DefineType(dylibTypeId, dylibName, dylibType);
-
-	StructureBuilder dylibCommandBuilder;
-	dylibCommandBuilder.AddMember(Type::NamedType(this, cmdTypeEnumQualName), "cmd");
-	dylibCommandBuilder.AddMember(Type::IntegerType(4, false), "cmdsize");
-	dylibCommandBuilder.AddMember(Type::NamedType(this, dylibQualName), "dylib");
-	Ref<Structure> dylibCommandStruct = dylibCommandBuilder.Finalize();
-	QualifiedName dylibCommandName = string("dylib_command");
-	string dylibCommandTypeId = Type::GenerateAutoTypeId("macho", dylibCommandName);
-	Ref<Type> dylibCommandType = Type::StructureType(dylibCommandStruct);
-	QualifiedName dylibCommandQualName = DefineType(dylibCommandTypeId, dylibCommandName, dylibCommandType);
-
-	// Apply Mach-O header types
 	vector<std::tuple<uint64_t, string>> machoHeaderStarts;
-	machoHeaderStarts.emplace_back(m_textBase, "");
-	if (m_textBase != preferredImageBase)
+	machoHeaderStarts.emplace_back(m_header.textBase, "");
+	if (m_header.textBase != preferredImageBase)
 		machoHeaderStarts.emplace_back(preferredImageBase, preferredImageBaseDesc);
 
+	// Apply Mach-O header types
 	for (auto [imageBase, imageDesc] : machoHeaderStarts)
 	{
 		string errorMsg;
@@ -1962,7 +1988,7 @@ bool MachoView::Init()
 		if (!loadCommandOffset)
 			continue;
 
-		DefineDataVariable(imageBase, Type::NamedType(this, headerQualName));
+		DefineDataVariable(imageBase, Type::NamedType(this, m_typeNames.headerQualName));
 		DefineAutoSymbol(new Symbol(DataSymbol, "__macho_header" + imageDesc, imageBase, LocalBinding));
 
 		try
@@ -1978,75 +2004,75 @@ bool MachoView::Init()
 				uint64_t nextOffset = curOffset + load.cmdsize;
 				switch (load.cmd)
 				{
-					case LC_SEGMENT:
+				case LC_SEGMENT:
+				{
+					DefineDataVariable(curOffset, Type::NamedType(this, m_typeNames.loadSegmentCommandQualName));
+					virtualReader.SeekRelative(5 * 8);
+					size_t numSections = virtualReader.Read32();
+					virtualReader.SeekRelative(4);
+					for (size_t j = 0; j < numSections; j++)
 					{
-						DefineDataVariable(curOffset, Type::NamedType(this, loadSegmentCommandQualName));
-						virtualReader.SeekRelative(5 * 8);
-						size_t numSections = virtualReader.Read32();
-						virtualReader.SeekRelative(4);
-						for (size_t j = 0; j < numSections; j++)
-						{
-							DefineDataVariable(virtualReader.GetOffset(), Type::NamedType(this, sectionQualName));
+							DefineDataVariable(virtualReader.GetOffset(), Type::NamedType(this, m_typeNames.sectionQualName));
 							DefineAutoSymbol(new Symbol(DataSymbol, "__macho_section" + imageDesc + "_[" + to_string(sectionNum++) + "]", virtualReader.GetOffset(), LocalBinding));
 							virtualReader.SeekRelative((8 * 8) + 4);
-						}
-						break;
 					}
-					case LC_SEGMENT_64:
+					break;
+				}
+				case LC_SEGMENT_64:
+				{
+					DefineDataVariable(curOffset, Type::NamedType(this, m_typeNames.loadSegment64CommandQualName));
+					virtualReader.SeekRelative(7 * 8);
+					size_t numSections = virtualReader.Read32();
+					virtualReader.SeekRelative(4);
+					for (size_t j = 0; j < numSections; j++)
 					{
-						DefineDataVariable(curOffset, Type::NamedType(this, loadSegment64CommandQualName));
-						virtualReader.SeekRelative(7 * 8);
-						size_t numSections = virtualReader.Read32();
-						virtualReader.SeekRelative(4);
-						for (size_t j = 0; j < numSections; j++)
-						{
-							DefineDataVariable(virtualReader.GetOffset(), Type::NamedType(this, section64QualName));
+							DefineDataVariable(virtualReader.GetOffset(), Type::NamedType(this, m_typeNames.section64QualName));
 							DefineAutoSymbol(new Symbol(DataSymbol, "__macho_section_64" + imageDesc + "_[" + to_string(sectionNum++) + "]", virtualReader.GetOffset(), LocalBinding));
 							virtualReader.SeekRelative(10 * 8);
-						}
-						break;
 					}
-					case LC_SYMTAB:
-						DefineDataVariable(curOffset, Type::NamedType(this, symtabQualName));
-						break;
-					case LC_DYSYMTAB:
-						DefineDataVariable(curOffset, Type::NamedType(this, dynsymtabQualName));
-						break;
-					case LC_UUID:
-						DefineDataVariable(curOffset, Type::NamedType(this, uuidQualName));
-						break;
-					case LC_ID_DYLIB:
-					case LC_LOAD_DYLIB:
-					case LC_REEXPORT_DYLIB:
-					case LC_LOAD_WEAK_DYLIB:
-					case LC_LOAD_UPWARD_DYLIB:
-						DefineDataVariable(curOffset, Type::NamedType(this, dylibCommandQualName));
-						if (load.cmdsize-24 <= 150)
+					break;
+				}
+				case LC_SYMTAB:
+					DefineDataVariable(curOffset, Type::NamedType(this, m_typeNames.symtabQualName));
+					break;
+				case LC_DYSYMTAB:
+					DefineDataVariable(curOffset, Type::NamedType(this, m_typeNames.dynsymtabQualName));
+					break;
+				case LC_UUID:
+					DefineDataVariable(curOffset, Type::NamedType(this, m_typeNames.uuidQualName));
+					break;
+				case LC_ID_DYLIB:
+				case LC_LOAD_DYLIB:
+				case LC_REEXPORT_DYLIB:
+				case LC_LOAD_WEAK_DYLIB:
+				case LC_LOAD_UPWARD_DYLIB:
+					DefineDataVariable(curOffset, Type::NamedType(this, m_typeNames.dylibCommandQualName));
+					if (load.cmdsize-24 <= 150)
 							DefineDataVariable(curOffset + 24, Type::ArrayType(Type::IntegerType(1, true), load.cmdsize-24));
-						break;
-					case LC_CODE_SIGNATURE:
-					case LC_SEGMENT_SPLIT_INFO:
-					case LC_FUNCTION_STARTS:
-					case LC_DATA_IN_CODE:
-					case LC_DYLIB_CODE_SIGN_DRS:
-					case LC_DYLD_EXPORTS_TRIE:
-					case LC_DYLD_CHAINED_FIXUPS:
-						DefineDataVariable(curOffset, Type::NamedType(this, linkeditDataQualName));
-						break;
-					case LC_ENCRYPTION_INFO:
-						DefineDataVariable(curOffset, Type::NamedType(this, encryptionInfoQualName));
-						break;
-					case LC_VERSION_MIN_MACOSX:
-					case LC_VERSION_MIN_IPHONEOS:
-						DefineDataVariable(curOffset, Type::NamedType(this, versionMinQualName));
-						break;
-					case LC_DYLD_INFO:
-					case LC_DYLD_INFO_ONLY:
-						DefineDataVariable(curOffset, Type::NamedType(this, dyldInfoQualName));
-						break;
-					default:
-						DefineDataVariable(curOffset, Type::NamedType(this, loadCommandQualName));
-						break;
+					break;
+				case LC_CODE_SIGNATURE:
+				case LC_SEGMENT_SPLIT_INFO:
+				case LC_FUNCTION_STARTS:
+				case LC_DATA_IN_CODE:
+				case LC_DYLIB_CODE_SIGN_DRS:
+				case LC_DYLD_EXPORTS_TRIE:
+				case LC_DYLD_CHAINED_FIXUPS:
+					DefineDataVariable(curOffset, Type::NamedType(this, m_typeNames.linkeditDataQualName));
+					break;
+				case LC_ENCRYPTION_INFO:
+					DefineDataVariable(curOffset, Type::NamedType(this, m_typeNames.encryptionInfoQualName));
+					break;
+				case LC_VERSION_MIN_MACOSX:
+				case LC_VERSION_MIN_IPHONEOS:
+					DefineDataVariable(curOffset, Type::NamedType(this, m_typeNames.versionMinQualName));
+					break;
+				case LC_DYLD_INFO:
+				case LC_DYLD_INFO_ONLY:
+					DefineDataVariable(curOffset, Type::NamedType(this, m_typeNames.dyldInfoQualName));
+					break;
+				default:
+					DefineDataVariable(curOffset, Type::NamedType(this, m_typeNames.loadCommandQualName));
+					break;
 				}
 
 				DefineAutoSymbol(new Symbol(DataSymbol, "__macho_load_command" + imageDesc + "_[" + to_string(i) + "]", curOffset, LocalBinding));
@@ -2055,13 +2081,11 @@ bool MachoView::Init()
 		}
 		catch (ReadException&)
 		{
-			m_logger->LogError("Error when applying Mach-O header types at %" PRIx64, imageBase);
+			LogError("Error when applying Mach-O header types at %" PRIx64, imageBase);
 		}
 	}
 
-	std::chrono::steady_clock::time_point endTime = std::chrono::steady_clock::now();
-	double t = std::chrono::duration_cast<std::chrono::milliseconds>(endTime - startTime).count() / 1000.0;
-	m_logger->LogInfo("Mach-O parsing took %.3f seconds\n", t);
+
 	return true;
 }
 
@@ -2084,7 +2108,7 @@ Ref<Symbol> MachoView::DefineMachoSymbol(
 
 		// Ensure symbol is within the executable
 		bool ok = false;
-		for (auto& segment : m_segments)
+		for (auto& segment : m_header.segments)
 		{
 			if ((segment.initprot == MACHO_VM_PROT_NONE) || (!segment.vmsize))
 				continue;
@@ -2169,9 +2193,9 @@ Ref<Symbol> MachoView::DefineMachoSymbol(
 	return DefineAutoSymbolAndVariableOrFunction(GetDefaultPlatform(), result.first, result.second);
 }
 
-bool MachoView::GetSegmentPermissions(uint64_t address, uint32_t &flags)
+bool MachoView::GetSegmentPermissions(MachOHeader& header, uint64_t address, uint32_t &flags)
 {
-	for (auto& segment : m_segments)
+	for (auto& segment : header.segments)
 	{
 		if ((segment.initprot == MACHO_VM_PROT_NONE) || (!segment.vmsize))
 			continue;
@@ -2186,9 +2210,9 @@ bool MachoView::GetSegmentPermissions(uint64_t address, uint32_t &flags)
 	return false;
 }
 
-bool MachoView::GetSectionPermissions(uint64_t address, uint32_t &flags)
+bool MachoView::GetSectionPermissions(MachOHeader& header, uint64_t address, uint32_t &flags)
 {
-	for (auto& section : m_sections)
+	for (auto& section : header.sections)
 	{
 		if (!section.size)
 			continue;
@@ -2203,11 +2227,11 @@ bool MachoView::GetSectionPermissions(uint64_t address, uint32_t &flags)
 	return false;
 }
 
-void MachoView::ParseExportTrie(BinaryReader& reader)
+void MachoView::ParseExportTrie(BinaryReader& reader, linkedit_data_command exportTrie)
 {
 	try {
-		uint32_t endGuard = m_exportTrie.datasize;
-		DataBuffer buffer = GetParentView()->ReadBuffer(m_universalImageOffset + m_exportTrie.dataoff, m_exportTrie.datasize);
+		uint32_t endGuard = exportTrie.datasize;
+		DataBuffer buffer = GetParentView()->ReadBuffer(m_universalImageOffset + exportTrie.dataoff, exportTrie.datasize);
 
 		std::vector<ExportNode> nodes;
 		ReadExportNode(buffer, nodes, "", 0, endGuard);
@@ -2262,7 +2286,7 @@ void MachoView::ReadExportNode(DataBuffer& buffer, std::vector<ExportNode>& resu
 	}
 }
 
-void MachoView::ParseDynamicTable(BinaryReader& reader, BNSymbolType incomingType, uint32_t tableOffset,
+void MachoView::ParseDynamicTable(BinaryReader& reader, MachOHeader& header, BNSymbolType incomingType, uint32_t tableOffset,
 	uint32_t tableSize, BNSymbolBinding binding)
 {
 	try {
@@ -2316,9 +2340,9 @@ void MachoView::ParseDynamicTable(BinaryReader& reader, BNSymbolType incomingTyp
 				case BindOpcodeSetSegmentAndOffsetULEB:
 					segmentIndex = imm;
 					offset = readLEB128(table, tableSize, i);
-					if (segmentIndex >= m_segments.size())
+					if (segmentIndex >= header.segments.size())
 						throw MachoFormatException();
-					address = m_segments[segmentIndex].vmaddr + offset;
+					address = header.segments[segmentIndex].vmaddr + offset;
 					break;
 				case BindOpcodeAddAddressULEB:
 					address += readLEB128(table, tableSize, i);
@@ -2372,29 +2396,29 @@ void MachoView::ParseDynamicTable(BinaryReader& reader, BNSymbolType incomingTyp
 }
 
 
-void MachoView::ParseSymbolTable(BinaryReader& reader, const symtab_command& symtab, const vector<uint32_t>& indirectSymbols)
+void MachoView::ParseSymbolTable(BinaryReader& reader, MachOHeader& header, const symtab_command& symtab, const vector<uint32_t>& indirectSymbols)
 {
 	try
 	{
 		//First parse the imports
 		m_logger->LogDebug("Bind symbols");
-		ParseDynamicTable(reader, ImportAddressSymbol, m_dyldInfo.bind_off, m_dyldInfo.bind_size, GlobalBinding);
+		ParseDynamicTable(reader, header, ImportAddressSymbol, header.dyldInfo.bind_off, header.dyldInfo.bind_size, GlobalBinding);
 		m_logger->LogDebug("Weak symbols");
-		ParseDynamicTable(reader, ImportAddressSymbol, m_dyldInfo.weak_bind_off, m_dyldInfo.weak_bind_size, WeakBinding);
+		ParseDynamicTable(reader, header, ImportAddressSymbol, header.dyldInfo.weak_bind_off, header.dyldInfo.weak_bind_size, WeakBinding);
 		m_logger->LogDebug("Lazy symbols");
-		ParseDynamicTable(reader, ImportAddressSymbol, m_dyldInfo.lazy_bind_off, m_dyldInfo.lazy_bind_size, GlobalBinding);
+		ParseDynamicTable(reader, header, ImportAddressSymbol, header.dyldInfo.lazy_bind_off, header.dyldInfo.lazy_bind_size, GlobalBinding);
 		m_logger->LogDebug("Chained Fixups");
-		ParseChainedFixups();
-		if (m_exportTrie.dataoff)
-			ParseExportTrie(reader);
+		ParseChainedFixups(header.chainedFixups);
+		if (header.exportTrie.dataoff)
+			ParseExportTrie(reader, header.exportTrie);
 
 		//Then process the symtab
-		if (m_stringListSize == 0)
+		if (header.stringListSize == 0)
 			return;
 		reader.Seek(symtab.symoff);
 
 		unordered_map<size_t, vector<std::pair<section_64*, size_t>>> stubSymbols;
-		for (auto& symbolStubs : m_symbolStubSections)
+		for (auto& symbolStubs : header.symbolStubSections)
 		{
 			if (!symbolStubs.reserved2)
 				continue;
@@ -2406,7 +2430,7 @@ void MachoView::ParseSymbolTable(BinaryReader& reader, const symtab_command& sym
 				// Apple's source code
 				uint8_t  sectionType  = (symbolStubs.flags & SECTION_TYPE);
 				bool selfModifyingStub = (sectionType == S_SYMBOL_STUBS) && (symbolStubs.flags & S_ATTR_SELF_MODIFYING_CODE) &&
-					(symbolStubs.reserved2 == 5) && (m_ident.cputype == MACHO_CPU_TYPE_X86);
+					(symbolStubs.reserved2 == 5) && (header.ident.cputype == MACHO_CPU_TYPE_X86);
 				uint32_t elementSize = selfModifyingStub ? symbolStubs.reserved2 : m_arch->GetAddressSize();
 				auto symNum = indirectSymbols[j + symbolStubs.reserved1];
 				if (symNum == INDIRECT_SYMBOL_ABS)
@@ -2420,13 +2444,13 @@ void MachoView::ParseSymbolTable(BinaryReader& reader, const symtab_command& sym
 		}
 
 		unordered_map<size_t, vector<std::pair<section_64*, size_t>>> pointerSymbols;
-		for (auto& symbolPointerSection : m_symbolPointerSections)
+		for (auto& symbolPointerSection : header.symbolPointerSections)
 		{
 			// Not exactly sure what the following 3 variables are for but this is the check done in
 			// Apple's source code
 			uint8_t  sectionType  = (symbolPointerSection.flags & SECTION_TYPE);
 			bool selfModifyingStub = (sectionType == S_SYMBOL_STUBS) && (symbolPointerSection.flags & S_ATTR_SELF_MODIFYING_CODE) &&
-				(symbolPointerSection.reserved2 == 5) && (m_ident.cputype == MACHO_CPU_TYPE_X86);
+				(symbolPointerSection.reserved2 == 5) && (header.ident.cputype == MACHO_CPU_TYPE_X86);
 			uint32_t elementSize = selfModifyingStub ? symbolPointerSection.reserved2 : m_arch->GetAddressSize();
 			size_t needed = symbolPointerSection.size / m_addressSize;
 			for (size_t j = 0; (j < needed) && ((j + symbolPointerSection.reserved1) < indirectSymbols.size()); j++)
@@ -2455,7 +2479,7 @@ void MachoView::ParseSymbolTable(BinaryReader& reader, const symtab_command& sym
 			if (sym.n_strx >= symtab.strsize || ((sym.n_type & N_TYPE) == N_INDR))
 				continue;
 
-			string symbol((char*)m_stringList.GetDataAt(sym.n_strx));
+			string symbol((char*)header.stringList->GetDataAt(sym.n_strx));
 			m_symbols.push_back(symbol);
 			//otool ignores symbols that end with ".o", startwith "ltmp" or are "gcc_compiled." so do we
 			if (symbol == "gcc_compiled." ||
@@ -2470,13 +2494,13 @@ void MachoView::ParseSymbolTable(BinaryReader& reader, const symtab_command& sym
 			//Very curious to see how other tools handle it.
 			BNSymbolType type = DataSymbol;
 			uint32_t flags;
-			if ((sym.n_type & N_TYPE) == N_SECT && sym.n_sect > 0 && (size_t)(sym.n_sect - 1) < m_sections.size())
+			if ((sym.n_type & N_TYPE) == N_SECT && sym.n_sect > 0 && (size_t)(sym.n_sect - 1) < header.sections.size())
 			{
-				if (!GetSectionPermissions(sym.n_value, flags))
+				if (!GetSectionPermissions(header, sym.n_value, flags))
 				{
 					if ((sym.n_type & N_EXT))
 					{
-						if (!GetSegmentPermissions(sym.n_value, flags))
+						if (!GetSegmentPermissions(header, sym.n_value, flags))
 						{
 							m_logger->LogDebug("No valid segment for symbol %s. value:%" PRIx64, symbol.c_str(), sym.n_value);
 							continue;
@@ -2492,7 +2516,7 @@ void MachoView::ParseSymbolTable(BinaryReader& reader, const symtab_command& sym
 			else if ((sym.n_type & N_TYPE) == N_ABS)
 			{
 				//N_ABS symbols do not have a section. Fall back to segment permissions.
-				if (!GetSegmentPermissions(sym.n_value, flags))
+				if (!GetSegmentPermissions(header, sym.n_value, flags))
 				{
 					m_logger->LogDebug("No valid segment for symbol %s. value:%" PRIx64, symbol.c_str(), sym.n_value);
 					continue;
@@ -2521,15 +2545,15 @@ void MachoView::ParseSymbolTable(BinaryReader& reader, const symtab_command& sym
 			bool deferred = stubSymbolIter == stubSymbols.end() && pointerSymbolIter == pointerSymbols.end();
 
 			Ref<Symbol> symbolObj;
-			if(m_dysymtab.nlocalsym && i >= m_dysymtab.ilocalsym && i < m_dysymtab.ilocalsym + m_dysymtab.nlocalsym)
+			if(header.dysymtab.nlocalsym && i >= header.dysymtab.ilocalsym && i < header.dysymtab.ilocalsym + header.dysymtab.nlocalsym)
 			{
 				symbolObj = DefineMachoSymbol(type, symbol, sym.n_value, LocalBinding, deferred);
 			}
-			else if (m_dysymtab.nextdefsym && i >= m_dysymtab.iextdefsym && i < m_dysymtab.iextdefsym + m_dysymtab.nextdefsym)
+			else if (header.dysymtab.nextdefsym && i >= header.dysymtab.iextdefsym && i < header.dysymtab.iextdefsym + header.dysymtab.nextdefsym)
 			{
 				symbolObj = DefineMachoSymbol(type, symbol, sym.n_value, GlobalBinding, deferred);
 			}
-			else if (m_dysymtab.nundefsym && i >= m_dysymtab.iundefsym && i < m_dysymtab.iundefsym + m_dysymtab.nundefsym)
+			else if (header.dysymtab.nundefsym && i >= header.dysymtab.iundefsym && i < header.dysymtab.iundefsym + header.dysymtab.nundefsym)
 			{
 				symbolObj = DefineMachoSymbol(type, symbol, sym.n_value, GlobalBinding, deferred);
 			}
@@ -2578,9 +2602,11 @@ void MachoView::ParseSymbolTable(BinaryReader& reader, const symtab_command& sym
 }
 
 
-void MachoView::ParseChainedFixups()
+
+
+void MachoView::ParseChainedFixups(linkedit_data_command chainedFixups)
 {
-	if (!m_chainedFixups.dataoff)
+	if (!chainedFixups.dataoff)
 		return;
 
 	m_logger->LogDebug("Processing Chained Fixups");
@@ -2599,7 +2625,7 @@ void MachoView::ParseChainedFixups()
 
 	try {
 		dyld_chained_fixups_header fixupsHeader {};
-		uint64_t fixupHeaderAddress = m_universalImageOffset + m_chainedFixups.dataoff;
+		uint64_t fixupHeaderAddress = m_universalImageOffset + chainedFixups.dataoff;
 		parentReader.Seek(fixupHeaderAddress);
 		fixupsHeader.fixups_version = parentReader.Read32();
 		fixupsHeader.starts_offset = parentReader.Read32();
@@ -2620,7 +2646,7 @@ void MachoView::ParseChainedFixups()
 			return;
 		}
 
-		if (importTableSize > m_chainedFixups.datasize)
+		if (importTableSize > chainedFixups.datasize)
 		{
 			m_logger->LogError("Chained Fixup parsing failed. Binary is malformed");
 			return;
@@ -2968,10 +2994,10 @@ void MachoView::ParseChainedFixups()
 
 uint64_t MachoView::PerformGetEntryPoint() const
 {
-	if (m_entryPoints.size() == 0)
+	if (m_header.m_entryPoints.size() == 0)
 		return 0;
 
-	return m_entryPoints[0];
+	return m_header.m_entryPoints[0];
 }
 
 
