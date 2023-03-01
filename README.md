@@ -1,6 +1,10 @@
 # view-macho
 This is the Mach-O view plugin that ships with Binary Ninja.
 
+## Issues
+
+Issues for this repository have been disabled. Please file an issue for this repository at https://github.com/Vector35/binaryninja-api/issues. All previously existing issues for this repository have been transferred there as well.
+
 ## Building
 
 Building the architecture plugin requires `cmake` 3.9 or above. You will also need the
