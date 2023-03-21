@@ -1357,6 +1357,7 @@ bool MachoView::Init()
 			uint64_t target = (m_addressSize == 4) ? reader.Read32() : reader.Read64();
 			target += m_imageBaseAdjustment;
 			Ref<Platform> targetPlatform = platform->GetAssociatedPlatformByAddress(target);
+			DefineMachoSymbol(FunctionSymbol, "mod_init_func_" + to_string(i), target, GlobalBinding, false);
 			AddEntryPointForAnalysis(targetPlatform, target);
 		}
 	}
