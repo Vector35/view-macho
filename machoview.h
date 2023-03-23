@@ -1233,10 +1233,10 @@ namespace BinaryNinja
 	};
 
 	struct MachOHeader {
-		uint64_t headerOffset;
+		uint64_t headerOffset = 0;
 
-		uint64_t textBase;
-		uint64_t loadCommandOffset;
+		uint64_t textBase = 0;
+		uint64_t loadCommandOffset = 0;
 		mach_header_64 ident;
 
 		std::vector<std::pair<uint64_t, bool>> entryPoints;

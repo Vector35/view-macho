@@ -272,7 +272,6 @@ MachOHeader MachoView::HeaderForAddress(BinaryView* data, uint64_t address, bool
 {
 	MachOHeader header;
 
-	bzero(&header, sizeof(MachOHeader));
 	header.stringList = new DataBuffer();
 
 	std::string errorMsg;
