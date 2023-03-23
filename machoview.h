@@ -1233,10 +1233,10 @@ namespace BinaryNinja
 	};
 
 	struct MachOHeader {
-		uint64_t headerOffset;
+		uint64_t headerOffset = 0;
 
-		uint64_t textBase;
-		uint64_t loadCommandOffset;
+		uint64_t textBase = 0;
+		uint64_t loadCommandOffset = 0;
 		mach_header_64 ident;
 
 		std::vector<std::pair<uint64_t, bool>> entryPoints;
@@ -1280,6 +1280,30 @@ namespace BinaryNinja
 		MachOHeader m_header;
 		std::map<uint64_t, MachOHeader> m_subHeaders; // Used for MH_FILESET entries.
 
+		struct HeaderQualifiedNames {
+			QualifiedName cpuTypeEnumQualName;
+			QualifiedName fileTypeEnumQualName;
+			QualifiedName flagsTypeEnumQualName;
+			QualifiedName headerQualName;
+			QualifiedName cmdTypeEnumQualName;
+			QualifiedName loadCommandQualName;
+			QualifiedName protTypeEnumQualName;
+			QualifiedName segFlagsTypeEnumQualName;
+			QualifiedName loadSegmentCommandQualName;
+			QualifiedName loadSegment64CommandQualName;
+			QualifiedName sectionQualName;
+			QualifiedName section64QualName;
+			QualifiedName symtabQualName;
+			QualifiedName dynsymtabQualName;
+			QualifiedName uuidQualName;
+			QualifiedName linkeditDataQualName;
+			QualifiedName encryptionInfoQualName;
+			QualifiedName versionMinQualName;
+			QualifiedName dyldInfoQualName;
+			QualifiedName dylibQualName;
+			QualifiedName dylibCommandQualName;
+		} m_typeNames;
+
 		uint64_t m_universalImageOffset;
 		bool m_parseOnly, m_backedByDatabase;
 		int64_t m_imageBaseAdjustment;
@@ -1303,7 +1327,7 @@ namespace BinaryNinja
 		std::vector<section_64> m_allSections;
 
 		MachOHeader HeaderForAddress(BinaryView* data, uint64_t address, bool isMainHeader);
-		bool InitializeHeader(MachOHeader& header, bool isMainHeader);
+		bool InitializeHeader(MachOHeader& header, bool isMainHeader, uint64_t preferredImageBase, std::string preferredImageBaseDesc);
 
 		void RebaseThreadStarts(BinaryReader& virtualReader, std::vector<uint32_t>& threadStarts, uint64_t stepMultiplier);
 		Ref<Symbol> DefineMachoSymbol(
