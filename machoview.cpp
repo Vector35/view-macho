@@ -268,16 +268,51 @@ MachoView::MachoView(const string& typeName, BinaryView* data, bool parseOnly): 
 }
 
 
-MachOHeader MachoView::HeaderForAddress(BinaryView* data, uint64_t address, bool isMainHeader)
+MachOHeader MachoView::HeaderForAddress(BinaryView* data, uint64_t address, bool isMainHeader, std::string identifierPrefix)
 {
 	MachOHeader header;
 
+	header.identifierPrefix = identifierPrefix;
 	header.stringList = new DataBuffer();
 
 	std::string errorMsg;
-	header.loadCommandOffset = g_machoViewType->ParseHeaders(data, m_universalImageOffset + address, header.ident, &m_arch, &m_plat, errorMsg);
-	if (!header.loadCommandOffset)
-		throw MachoFormatException(errorMsg);
+	if (isMainHeader) {
+		header.loadCommandOffset = g_machoViewType->ParseHeaders(data, m_universalImageOffset + address, header.ident, &m_arch, &m_plat, errorMsg);
+		if (!header.loadCommandOffset)
+			throw MachoFormatException(errorMsg);
+	}
+	else
+	{
+		// address is a Raw file offset
+		BinaryReader subReader(data);
+		subReader.Seek(address);
+
+		header.ident.magic = subReader.Read32();
+
+		BNEndianness endianness;
+		if (header.ident.magic == MH_MAGIC || header.ident.magic == MH_MAGIC_64)
+			endianness = LittleEndian;
+		else if (header.ident.magic == MH_CIGAM || header.ident.magic == MH_CIGAM_64)
+			endianness = BigEndian;
+		else
+		{
+			throw ReadException();
+		}
+
+		subReader.SetEndianness(endianness);
+		header.ident.cputype    = subReader.Read32();
+		header.ident.cpusubtype = subReader.Read32();
+		header.ident.filetype   = subReader.Read32();
+		header.ident.ncmds      = subReader.Read32();
+		header.ident.sizeofcmds = subReader.Read32();
+		header.ident.flags      = subReader.Read32();
+		if ((header.ident.cputype & MachOABIMask) == MachOABI64) // address size == 8
+		{
+			header.ident.reserved = subReader.Read32();
+		}
+		header.loadCommandOffset = subReader.GetOffset();
+	}
+
 
 	if (isMainHeader)
 	{
@@ -791,6 +826,24 @@ MachOHeader MachoView::HeaderForAddress(BinaryView* data, uint64_t address, bool
 				}
 				break;
 			}
+			case LC_FILESET_ENTRY:
+			{
+				if (isMainHeader)
+				{
+					uint64_t vmAddr = reader.Read64();
+					uint64_t fAddr = reader.Read64();
+					uint64_t strOff = reader.Read32() + curOffset;
+					reader.Seek(strOff);
+					auto identPrefix = reader.ReadCString(load.cmdsize - strOff);
+					MachOHeader subHeader = HeaderForAddress(data, fAddr, false, identPrefix);
+					subHeader.textBase = vmAddr;
+					m_subHeaders[vmAddr] = subHeader;
+				}
+				else {
+					throw ReadException();
+				}
+				break;
+			}
 			default:
 				m_logger->LogDebug("Unhandled command: %s : %" PRIu32 "\n", CommandToString(load.cmd).c_str(), load.cmdsize);
 				break;
@@ -1091,6 +1144,7 @@ bool MachoView::Init()
 	fileTypeBuilder.AddMemberWithValue("MH_DYLIB_STUB", MH_DYLIB_STUB);
 	fileTypeBuilder.AddMemberWithValue("MH_DSYM", MH_DSYM);
 	fileTypeBuilder.AddMemberWithValue("MH_KEXT_BUNDLE", MH_KEXT_BUNDLE);
+	fileTypeBuilder.AddMemberWithValue("MH_FILESET", MH_FILESET);
 	Ref<Enumeration> fileTypeEnum = fileTypeBuilder.Finalize();
 
 	Ref<Type> fileTypeEnumType = Type::EnumerationType(nullptr, fileTypeEnum, 4, false);
@@ -1207,7 +1261,7 @@ bool MachoView::Init()
 	cmdTypeBuilder.AddMemberWithValue("LC_BUILD_VERSION", LC_BUILD_VERSION);
 	cmdTypeBuilder.AddMemberWithValue("LC_DYLD_EXPORTS_TRIE", LC_DYLD_EXPORTS_TRIE);
 	cmdTypeBuilder.AddMemberWithValue("LC_DYLD_CHAINED_FIXUPS", LC_DYLD_CHAINED_FIXUPS);
-	cmdTypeBuilder.AddMemberWithValue("LC_FILESET_ENTRY", LC_DYLD_CHAINED_FIXUPS);
+	cmdTypeBuilder.AddMemberWithValue("LC_FILESET_ENTRY", LC_FILESET_ENTRY);
 	Ref<Enumeration> cmdTypeEnum = cmdTypeBuilder.Finalize();
 
 	Ref<Type> cmdTypeEnumType = Type::EnumerationType(nullptr, cmdTypeEnum, 4, false);
@@ -1450,8 +1504,27 @@ bool MachoView::Init()
 	Ref<Type> dylibCommandType = Type::StructureType(dylibCommandStruct);
 	m_typeNames.dylibCommandQualName = DefineType(dylibCommandTypeId, dylibCommandName, dylibCommandType);
 
+	StructureBuilder filesetEntryCommandBuilder;
+	filesetEntryCommandBuilder.AddMember(Type::NamedType(this, m_typeNames.cmdTypeEnumQualName), "cmd");
+	filesetEntryCommandBuilder.AddMember(Type::IntegerType(4, false), "cmdsize");
+	filesetEntryCommandBuilder.AddMember(Type::IntegerType(8, false), "vmaddr");
+	filesetEntryCommandBuilder.AddMember(Type::IntegerType(8, false), "fileoff");
+	filesetEntryCommandBuilder.AddMember(Type::IntegerType(4, false), "entry_id");
+	filesetEntryCommandBuilder.AddMember(Type::IntegerType(4, false), "reserved");
+	Ref<Structure> filesetEntryCommandStruct = filesetEntryCommandBuilder.Finalize();
+	QualifiedName filesetEntryCommandName = string("fileset_entry_command");
+	string filesetEntryCommandTypeId = Type::GenerateAutoTypeId("macho", filesetEntryCommandName);
+	Ref<Type> filesetEntryCommandType = Type::StructureType(filesetEntryCommandStruct);
+	m_typeNames.filesetEntryCommandQualName = DefineType(filesetEntryCommandTypeId, filesetEntryCommandName, filesetEntryCommandType);
+
 	if (!InitializeHeader(m_header, true, preferredImageBase, preferredImageBaseDesc))
 		return false;
+
+	for (auto& it : m_subHeaders)
+	{
+		if (!InitializeHeader(it.second, false, it.first, ""))
+			return false;
+	}
 
 	std::chrono::steady_clock::time_point endTime = std::chrono::steady_clock::now();
 	double t = std::chrono::duration_cast<std::chrono::milliseconds>(endTime - startTime).count() / 1000.0;
@@ -1531,7 +1604,10 @@ bool MachoView::InitializeHeader(MachOHeader& header, bool isMainHeader, uint64_
 		char sectionName[17];
 		memcpy(sectionName, section.sectname, sizeof(section.sectname));
 		sectionName[16] = 0;
-		header.sectionNames.push_back(sectionName);
+		if (header.identifierPrefix.empty())
+			header.sectionNames.push_back(sectionName);
+		else
+			header.sectionNames.push_back(header.identifierPrefix + "::" + sectionName);
 	}
 
 	header.sectionNames = GetUniqueSectionNames(header.sectionNames);
@@ -1976,9 +2052,14 @@ bool MachoView::InitializeHeader(MachOHeader& header, bool isMainHeader, uint64_
 	}
 
 	vector<std::tuple<uint64_t, string>> machoHeaderStarts;
-	machoHeaderStarts.emplace_back(m_header.textBase, "");
-	if (m_header.textBase != preferredImageBase)
+	if (isMainHeader) {
+		machoHeaderStarts.emplace_back(header.textBase, "");
+		if (header.textBase != preferredImageBase)
+			machoHeaderStarts.emplace_back(preferredImageBase, preferredImageBaseDesc);
+	}
+	else {
 		machoHeaderStarts.emplace_back(preferredImageBase, preferredImageBaseDesc);
+	}
 
 	// Apply Mach-O header types
 	for (auto [imageBase, imageDesc] : machoHeaderStarts)
@@ -2070,6 +2151,11 @@ bool MachoView::InitializeHeader(MachOHeader& header, bool isMainHeader, uint64_
 				case LC_DYLD_INFO:
 				case LC_DYLD_INFO_ONLY:
 					DefineDataVariable(curOffset, Type::NamedType(this, m_typeNames.dyldInfoQualName));
+					break;
+				case LC_FILESET_ENTRY:
+					DefineDataVariable(curOffset, Type::NamedType(this, m_typeNames.filesetEntryCommandQualName));
+					if (load.cmdsize-0x20 <= 150)
+							DefineDataVariable(curOffset + 0x20, Type::ArrayType(Type::IntegerType(1, true), load.cmdsize-0x20));
 					break;
 				default:
 					DefineDataVariable(curOffset, Type::NamedType(this, m_typeNames.loadCommandQualName));
@@ -3119,7 +3205,8 @@ uint64_t MachoViewType::ParseHeaders(BinaryView* data, uint64_t imageOffset, mac
 		ident.filetype == MH_KEXT_BUNDLE ||
 		ident.filetype == MH_CORE ||
 		ident.filetype == MH_PRELOAD ||
-		ident.filetype == MH_DSYM))
+		ident.filetype == MH_DSYM ||
+		ident.filetype == MH_FILESET))
 	{
 		m_logger->LogError("Unhandled Macho file class: 0x%x", ident.filetype);
 		errorMsg = "invalid file class";
