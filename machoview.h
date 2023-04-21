@@ -1306,6 +1306,8 @@ namespace BinaryNinja
 			QualifiedName filesetEntryCommandQualName;
 		} m_typeNames;
 
+		bool m_mhFilesetEnabled;
+
 		uint64_t m_universalImageOffset;
 		bool m_parseOnly, m_backedByDatabase;
 		int64_t m_imageBaseAdjustment;
