@@ -1235,6 +1235,8 @@ namespace BinaryNinja
 	};
 
 	struct MachOHeader {
+		bool isMainHeader;
+
 		uint64_t textBase = 0;
 		uint64_t loadCommandOffset = 0;
 		mach_header_64 ident;
