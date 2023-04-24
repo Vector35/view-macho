@@ -2107,7 +2107,8 @@ bool MachoView::InitializeHeader(MachOHeader& header, bool isMainHeader, uint64_
 	{
 		string errorMsg;
 		mach_header_64 mappedIdent;
-		uint64_t loadCommandOffset = header.loadCommandOffset;
+		uint64_t loadCommandOffset;
+		loadCommandOffset = g_machoViewType->ParseHeaders(this, imageBase, mappedIdent, nullptr, nullptr, errorMsg);
 		if (!loadCommandOffset)
 			continue;
 
