@@ -268,16 +268,52 @@ MachoView::MachoView(const string& typeName, BinaryView* data, bool parseOnly): 
 }
 
 
-MachOHeader MachoView::HeaderForAddress(BinaryView* data, uint64_t address, bool isMainHeader)
+MachOHeader MachoView::HeaderForAddress(BinaryView* data, uint64_t address, bool isMainHeader, std::string identifierPrefix)
 {
 	MachOHeader header;
+	header.isMainHeader = isMainHeader;
 
+	header.identifierPrefix = identifierPrefix;
 	header.stringList = new DataBuffer();
 
 	std::string errorMsg;
-	header.loadCommandOffset = g_machoViewType->ParseHeaders(data, m_universalImageOffset + address, header.ident, &m_arch, &m_plat, errorMsg);
-	if (!header.loadCommandOffset)
-		throw MachoFormatException(errorMsg);
+	if (isMainHeader) {
+		header.loadCommandOffset = g_machoViewType->ParseHeaders(data, m_universalImageOffset + address, header.ident, &m_arch, &m_plat, errorMsg);
+		if (!header.loadCommandOffset)
+			throw MachoFormatException(errorMsg);
+	}
+	else
+	{
+		// address is a Raw file offset
+		BinaryReader subReader(data);
+		subReader.Seek(address);
+
+		header.ident.magic = subReader.Read32();
+
+		BNEndianness endianness;
+		if (header.ident.magic == MH_MAGIC || header.ident.magic == MH_MAGIC_64)
+			endianness = LittleEndian;
+		else if (header.ident.magic == MH_CIGAM || header.ident.magic == MH_CIGAM_64)
+			endianness = BigEndian;
+		else
+		{
+			throw ReadException();
+		}
+
+		subReader.SetEndianness(endianness);
+		header.ident.cputype    = subReader.Read32();
+		header.ident.cpusubtype = subReader.Read32();
+		header.ident.filetype   = subReader.Read32();
+		header.ident.ncmds      = subReader.Read32();
+		header.ident.sizeofcmds = subReader.Read32();
+		header.ident.flags      = subReader.Read32();
+		if ((header.ident.cputype & MachOABIMask) == MachOABI64) // address size == 8
+		{
+			header.ident.reserved = subReader.Read32();
+		}
+		header.loadCommandOffset = subReader.GetOffset();
+	}
+
 
 	if (isMainHeader)
 	{
@@ -791,6 +827,24 @@ MachOHeader MachoView::HeaderForAddress(BinaryView* data, uint64_t address, bool
 				}
 				break;
 			}
+			case LC_FILESET_ENTRY:
+			{
+				if (isMainHeader)
+				{
+					uint64_t vmAddr = reader.Read64();
+					uint64_t fAddr = reader.Read64();
+					uint64_t strOff = reader.Read32() + curOffset;
+					reader.Seek(strOff);
+					auto identPrefix = reader.ReadCString(load.cmdsize - strOff);
+					MachOHeader subHeader = HeaderForAddress(data, fAddr, false, identPrefix);
+					subHeader.textBase = vmAddr;
+					m_subHeaders[vmAddr] = subHeader;
+				}
+				else {
+					throw ReadException();
+				}
+				break;
+			}
 			default:
 				m_logger->LogDebug("Unhandled command: %s : %" PRIu32 "\n", CommandToString(load.cmd).c_str(), load.cmdsize);
 				break;
@@ -1006,6 +1060,19 @@ bool MachoView::ParseRelocationEntry(const relocation_info& info, uint64_t start
 
 bool MachoView::Init()
 {
+	Ref<Settings> settings = GetLoadSettings(GetTypeName());
+	if ((settings && ((settings->Contains("loader.macho.processFileset")
+		&& !settings->Get<bool>("loader.macho.processFileset", this))
+		|| !settings->Contains("loader.macho.processFileset")))
+		|| (!settings && !m_parseOnly))
+		if (m_header.ident.filetype == MH_FILESET)
+		{
+			m_logger->LogError("Unhandled Macho file class: 0x%x (MH_FILESET)", m_header.ident.filetype);
+			m_logger->LogError("This version of Binary Ninja includes experimental support for "
+					   "MH_FILESET binaries. You can enable it via the "
+					   "\"loader.macho.processFileset\" key in \"Open with Options\".");
+			return false;
+		}
 	std::chrono::steady_clock::time_point startTime = std::chrono::steady_clock::now();
 	BinaryReader reader(GetParentView());
 	reader.SetEndianness(m_endian);
@@ -1035,7 +1102,6 @@ bool MachoView::Init()
 	}
 
 	uint64_t preferredImageBase = initialImageBase;
-	Ref<Settings> settings = GetLoadSettings(GetTypeName());
 	if (settings && settings->Contains("loader.imageBase") && settings->Contains("loader.architecture")) // handle overrides
 	{
 		preferredImageBase = settings->Get<uint64_t>("loader.imageBase", this);
@@ -1091,6 +1157,7 @@ bool MachoView::Init()
 	fileTypeBuilder.AddMemberWithValue("MH_DYLIB_STUB", MH_DYLIB_STUB);
 	fileTypeBuilder.AddMemberWithValue("MH_DSYM", MH_DSYM);
 	fileTypeBuilder.AddMemberWithValue("MH_KEXT_BUNDLE", MH_KEXT_BUNDLE);
+	fileTypeBuilder.AddMemberWithValue("MH_FILESET", MH_FILESET);
 	Ref<Enumeration> fileTypeEnum = fileTypeBuilder.Finalize();
 
 	Ref<Type> fileTypeEnumType = Type::EnumerationType(nullptr, fileTypeEnum, 4, false);
@@ -1207,7 +1274,7 @@ bool MachoView::Init()
 	cmdTypeBuilder.AddMemberWithValue("LC_BUILD_VERSION", LC_BUILD_VERSION);
 	cmdTypeBuilder.AddMemberWithValue("LC_DYLD_EXPORTS_TRIE", LC_DYLD_EXPORTS_TRIE);
 	cmdTypeBuilder.AddMemberWithValue("LC_DYLD_CHAINED_FIXUPS", LC_DYLD_CHAINED_FIXUPS);
-	cmdTypeBuilder.AddMemberWithValue("LC_FILESET_ENTRY", LC_DYLD_CHAINED_FIXUPS);
+	cmdTypeBuilder.AddMemberWithValue("LC_FILESET_ENTRY", LC_FILESET_ENTRY);
 	Ref<Enumeration> cmdTypeEnum = cmdTypeBuilder.Finalize();
 
 	Ref<Type> cmdTypeEnumType = Type::EnumerationType(nullptr, cmdTypeEnum, 4, false);
@@ -1450,8 +1517,27 @@ bool MachoView::Init()
 	Ref<Type> dylibCommandType = Type::StructureType(dylibCommandStruct);
 	m_typeNames.dylibCommandQualName = DefineType(dylibCommandTypeId, dylibCommandName, dylibCommandType);
 
+	StructureBuilder filesetEntryCommandBuilder;
+	filesetEntryCommandBuilder.AddMember(Type::NamedType(this, m_typeNames.cmdTypeEnumQualName), "cmd");
+	filesetEntryCommandBuilder.AddMember(Type::IntegerType(4, false), "cmdsize");
+	filesetEntryCommandBuilder.AddMember(Type::IntegerType(8, false), "vmaddr");
+	filesetEntryCommandBuilder.AddMember(Type::IntegerType(8, false), "fileoff");
+	filesetEntryCommandBuilder.AddMember(Type::IntegerType(4, false), "entry_id");
+	filesetEntryCommandBuilder.AddMember(Type::IntegerType(4, false), "reserved");
+	Ref<Structure> filesetEntryCommandStruct = filesetEntryCommandBuilder.Finalize();
+	QualifiedName filesetEntryCommandName = string("fileset_entry_command");
+	string filesetEntryCommandTypeId = Type::GenerateAutoTypeId("macho", filesetEntryCommandName);
+	Ref<Type> filesetEntryCommandType = Type::StructureType(filesetEntryCommandStruct);
+	m_typeNames.filesetEntryCommandQualName = DefineType(filesetEntryCommandTypeId, filesetEntryCommandName, filesetEntryCommandType);
+
 	if (!InitializeHeader(m_header, true, preferredImageBase, preferredImageBaseDesc))
 		return false;
+
+	for (auto& it : m_subHeaders)
+	{
+		if (!InitializeHeader(it.second, false, it.first, ""))
+			return false;
+	}
 
 	std::chrono::steady_clock::time_point endTime = std::chrono::steady_clock::now();
 	double t = std::chrono::duration_cast<std::chrono::milliseconds>(endTime - startTime).count() / 1000.0;
@@ -1500,41 +1586,47 @@ bool MachoView::InitializeHeader(MachOHeader& header, bool isMainHeader, uint64_
 		}
 	}
 
-	for (auto& segment : header.segments)
+	if (!(m_header.ident.filetype == MH_FILESET && isMainHeader)) \
 	{
-		if ((segment.initprot == MACHO_VM_PROT_NONE) || (!segment.vmsize))
-			continue;
+		for (auto &segment: header.segments) {
+			if ((segment.initprot == MACHO_VM_PROT_NONE) || (!segment.vmsize))
+				continue;
 
-		uint32_t flags = 0;
-		if (segment.initprot & MACHO_VM_PROT_READ)
-			flags |= SegmentReadable;
-		if (segment.initprot & MACHO_VM_PROT_WRITE)
-			flags |= SegmentWritable;
-		if (segment.initprot & MACHO_VM_PROT_EXECUTE)
-			flags |= SegmentExecutable;
-		if (((segment.initprot & MACHO_VM_PROT_WRITE) == 0) && ((segment.maxprot & MACHO_VM_PROT_WRITE) == 0))
-			flags |= SegmentDenyWrite;
-		if (((segment.initprot & MACHO_VM_PROT_EXECUTE) == 0) && ((segment.maxprot & MACHO_VM_PROT_EXECUTE) == 0))
-			flags |= SegmentDenyExecute;
-
-		// if we're positive we have an entry point for some reason, force the segment
-		// executable. this helps with kernel images.
-		for (auto& entryPoint : header.m_entryPoints)
-			if (segment.vmaddr <= entryPoint && (entryPoint < (segment.vmaddr + segment.filesize)))
+			uint32_t flags = 0;
+			if (segment.initprot & MACHO_VM_PROT_READ)
+				flags |= SegmentReadable;
+			if (segment.initprot & MACHO_VM_PROT_WRITE)
+				flags |= SegmentWritable;
+			if (segment.initprot & MACHO_VM_PROT_EXECUTE)
 				flags |= SegmentExecutable;
+			if (((segment.initprot & MACHO_VM_PROT_WRITE) == 0) &&
+			    ((segment.maxprot & MACHO_VM_PROT_WRITE) == 0))
+				flags |= SegmentDenyWrite;
+			if (((segment.initprot & MACHO_VM_PROT_EXECUTE) == 0) &&
+			    ((segment.maxprot & MACHO_VM_PROT_EXECUTE) == 0))
+				flags |= SegmentDenyExecute;
 
-		AddAutoSegment(segment.vmaddr, segment.vmsize, segment.fileoff, segment.filesize, flags);
+			// if we're positive we have an entry point for some reason, force the segment
+			// executable. this helps with kernel images.
+			for (auto &entryPoint: header.m_entryPoints)
+				if (segment.vmaddr <= entryPoint && (entryPoint < (segment.vmaddr + segment.filesize)))
+					flags |= SegmentExecutable;
+
+			AddAutoSegment(segment.vmaddr, segment.vmsize, segment.fileoff, segment.filesize, flags);
+		}
+		for (auto& section : header.sections)
+		{
+			char sectionName[17];
+			memcpy(sectionName, section.sectname, sizeof(section.sectname));
+			sectionName[16] = 0;
+			if (header.identifierPrefix.empty())
+				header.sectionNames.push_back(sectionName);
+			else
+				header.sectionNames.push_back(header.identifierPrefix + "::" + sectionName);
+		}
+
+		header.sectionNames = GetUniqueSectionNames(header.sectionNames);
 	}
-
-	for (auto& section : header.sections)
-	{
-		char sectionName[17];
-		memcpy(sectionName, section.sectname, sizeof(section.sectname));
-		sectionName[16] = 0;
-		header.sectionNames.push_back(sectionName);
-	}
-
-	header.sectionNames = GetUniqueSectionNames(header.sectionNames);
 
 	for (size_t i = 0; i < header.sections.size(); i++)
 	{
@@ -1699,6 +1791,9 @@ bool MachoView::InitializeHeader(MachOHeader& header, bool isMainHeader, uint64_
 			return true;
 	}
 
+	if (m_parseOnly)
+		return true;
+
 	BinaryReader reader(GetParentView());
 	reader.SetEndianness(m_endian);
 	reader.SetVirtualBase(m_universalImageOffset);
@@ -1748,6 +1843,17 @@ bool MachoView::InitializeHeader(MachOHeader& header, bool isMainHeader, uint64_
 			target += m_imageBaseAdjustment;
 			Ref<Platform> targetPlatform = platform->GetAssociatedPlatformByAddress(target);
 			DefineMachoSymbol(FunctionSymbol, "mod_init_func_" + to_string(modInitFuncCnt++), target, GlobalBinding, false);
+			if (m_header.ident.filetype == MH_FILESET)
+			{
+				// FIXME: This isn't a super robust way of detagging,
+				// 	  should look into xnu source and the tools used to build this cache (if they're public)
+				//	  and see if anything better can be done
+
+				// mask out top 8 bits
+				uint64_t tag = 0xFFFFFFFF00000000 & header.textBase;
+				// and combine them with bottom 8 of the original entry
+				target = tag | (target & 0xFFFFFFFF);
+			}
 			AddEntryPointForAnalysis(targetPlatform, target);
 		}
 	}
@@ -1785,6 +1891,17 @@ bool MachoView::InitializeHeader(MachOHeader& header, bool isMainHeader, uint64_
 	bool first = true;
 	for (auto entry : header.m_entryPoints)
 	{
+		if (m_header.ident.filetype == MH_FILESET)
+		{
+			// FIXME: This isn't a super robust way of detagging,
+			// 	  should look into xnu source and the tools used to build this cache (if they're public)
+			//	  and see if anything better can be done
+
+			// mask out top 8 bits
+			uint64_t tag = 0xFFFFFFFF00000000 & header.textBase;
+			// and combine them with bottom 8 of the original entry
+			entry = tag | (entry & 0xFFFFFFFF);
+		}
 		AddEntryPointForAnalysis(platform, entry);
 		if (first)
 		{
@@ -1976,16 +2093,22 @@ bool MachoView::InitializeHeader(MachOHeader& header, bool isMainHeader, uint64_
 	}
 
 	vector<std::tuple<uint64_t, string>> machoHeaderStarts;
-	machoHeaderStarts.emplace_back(m_header.textBase, "");
-	if (m_header.textBase != preferredImageBase)
+	if (isMainHeader) {
+		machoHeaderStarts.emplace_back(header.textBase, "");
+		if (header.textBase != preferredImageBase)
+			machoHeaderStarts.emplace_back(preferredImageBase, preferredImageBaseDesc);
+	}
+	else {
 		machoHeaderStarts.emplace_back(preferredImageBase, preferredImageBaseDesc);
+	}
 
 	// Apply Mach-O header types
 	for (auto [imageBase, imageDesc] : machoHeaderStarts)
 	{
 		string errorMsg;
 		mach_header_64 mappedIdent;
-		uint64_t loadCommandOffset = g_machoViewType->ParseHeaders(this, imageBase, mappedIdent, nullptr, nullptr, errorMsg);
+		uint64_t loadCommandOffset;
+		loadCommandOffset = g_machoViewType->ParseHeaders(this, imageBase, mappedIdent, nullptr, nullptr, errorMsg);
 		if (!loadCommandOffset)
 			continue;
 
@@ -2070,6 +2193,11 @@ bool MachoView::InitializeHeader(MachOHeader& header, bool isMainHeader, uint64_
 				case LC_DYLD_INFO:
 				case LC_DYLD_INFO_ONLY:
 					DefineDataVariable(curOffset, Type::NamedType(this, m_typeNames.dyldInfoQualName));
+					break;
+				case LC_FILESET_ENTRY:
+					DefineDataVariable(curOffset, Type::NamedType(this, m_typeNames.filesetEntryCommandQualName));
+					if (load.cmdsize-0x20 <= 150)
+							DefineDataVariable(curOffset + 0x20, Type::ArrayType(Type::IntegerType(1, true), load.cmdsize-0x20));
 					break;
 				default:
 					DefineDataVariable(curOffset, Type::NamedType(this, m_typeNames.loadCommandQualName));
@@ -2410,7 +2538,7 @@ void MachoView::ParseSymbolTable(BinaryReader& reader, MachOHeader& header, cons
 		ParseDynamicTable(reader, header, ImportAddressSymbol, header.dyldInfo.lazy_bind_off, header.dyldInfo.lazy_bind_size, GlobalBinding);
 		m_logger->LogDebug("Chained Fixups");
 		ParseChainedFixups(header.chainedFixups);
-		if (header.exportTrie.dataoff)
+		if (header.exportTrie.dataoff && header.isMainHeader)
 			ParseExportTrie(reader, header.exportTrie);
 
 		//Then process the symtab
@@ -3119,7 +3247,8 @@ uint64_t MachoViewType::ParseHeaders(BinaryView* data, uint64_t imageOffset, mac
 		ident.filetype == MH_KEXT_BUNDLE ||
 		ident.filetype == MH_CORE ||
 		ident.filetype == MH_PRELOAD ||
-		ident.filetype == MH_DSYM))
+		ident.filetype == MH_DSYM ||
+		ident.filetype == MH_FILESET))
 	{
 		m_logger->LogError("Unhandled Macho file class: 0x%x", ident.filetype);
 		errorMsg = "invalid file class";
@@ -3183,6 +3312,13 @@ Ref<Settings> MachoViewType::GetLoadSettingsForData(BinaryView* data)
 			"type" : "boolean",
 			"default" : true,
 			"description" : "Add function starts sourced from the Function Starts table to the core for analysis."
+			})");
+	settings->RegisterSetting("loader.macho.processFileset",
+			R"({
+			"title" : "MH_FILESET Processing (Experimental) ",
+			"type" : "boolean",
+			"default" : false,
+			"description" : "Enables processing for MH_FILESET binaries."
 			})");
 
 

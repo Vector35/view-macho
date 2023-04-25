@@ -199,6 +199,7 @@ typedef int vm_prot_t;
 #define LC_BUILD_VERSION         0x32
 #define LC_DYLD_EXPORTS_TRIE     (0x33 | LC_REQ_DYLD)
 #define LC_DYLD_CHAINED_FIXUPS   (0x34 | LC_REQ_DYLD)
+#define LC_FILESET_ENTRY         (0x35 | LC_REQ_DYLD)
 
 //Mach-O File types
 #define  MH_OBJECT                   0x1
@@ -212,6 +213,7 @@ typedef int vm_prot_t;
 #define  MH_DYLIB_STUB               0x9
 #define  MH_DSYM                     0xa
 #define  MH_KEXT_BUNDLE              0xb
+#define  MH_FILESET                  0xc
 
 #define  MH_NOUNDEFS                 0x1
 #define  MH_INCRLINK                 0x2
@@ -1233,11 +1235,12 @@ namespace BinaryNinja
 	};
 
 	struct MachOHeader {
-		uint64_t headerOffset = 0;
+		bool isMainHeader;
 
 		uint64_t textBase = 0;
 		uint64_t loadCommandOffset = 0;
 		mach_header_64 ident;
+		std::string identifierPrefix;
 
 		std::vector<std::pair<uint64_t, bool>> entryPoints;
 		std::vector<uint64_t> m_entryPoints; //list of entrypoints
@@ -1302,7 +1305,10 @@ namespace BinaryNinja
 			QualifiedName dyldInfoQualName;
 			QualifiedName dylibQualName;
 			QualifiedName dylibCommandQualName;
+			QualifiedName filesetEntryCommandQualName;
 		} m_typeNames;
+
+		bool m_mhFilesetEnabled;
 
 		uint64_t m_universalImageOffset;
 		bool m_parseOnly, m_backedByDatabase;
@@ -1326,7 +1332,7 @@ namespace BinaryNinja
 		std::vector<segment_command_64> m_allSegments; //only three types of sections __TEXT, __DATA, __IMPORT
 		std::vector<section_64> m_allSections;
 
-		MachOHeader HeaderForAddress(BinaryView* data, uint64_t address, bool isMainHeader);
+		MachOHeader HeaderForAddress(BinaryView* data, uint64_t address, bool isMainHeader, std::string identifierPrefix = "");
 		bool InitializeHeader(MachOHeader& header, bool isMainHeader, uint64_t preferredImageBase, std::string preferredImageBaseDesc);
 
 		void RebaseThreadStarts(BinaryReader& virtualReader, std::vector<uint32_t>& threadStarts, uint64_t stepMultiplier);
