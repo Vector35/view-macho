@@ -2560,7 +2560,6 @@ void MachoView::ParseSymbolTable(BinaryReader& reader, MachOHeader& header, cons
 				uint8_t  sectionType  = (symbolStubs.flags & SECTION_TYPE);
 				bool selfModifyingStub = (sectionType == S_SYMBOL_STUBS) && (symbolStubs.flags & S_ATTR_SELF_MODIFYING_CODE) &&
 					(symbolStubs.reserved2 == 5) && (header.ident.cputype == MACHO_CPU_TYPE_X86);
-				uint32_t elementSize = selfModifyingStub ? symbolStubs.reserved2 : m_arch->GetAddressSize();
 				auto symNum = indirectSymbols[j + symbolStubs.reserved1];
 				if (symNum == INDIRECT_SYMBOL_ABS)
 					continue;
@@ -2580,7 +2579,6 @@ void MachoView::ParseSymbolTable(BinaryReader& reader, MachOHeader& header, cons
 			uint8_t  sectionType  = (symbolPointerSection.flags & SECTION_TYPE);
 			bool selfModifyingStub = (sectionType == S_SYMBOL_STUBS) && (symbolPointerSection.flags & S_ATTR_SELF_MODIFYING_CODE) &&
 				(symbolPointerSection.reserved2 == 5) && (header.ident.cputype == MACHO_CPU_TYPE_X86);
-			uint32_t elementSize = selfModifyingStub ? symbolPointerSection.reserved2 : m_arch->GetAddressSize();
 			size_t needed = symbolPointerSection.size / m_addressSize;
 			for (size_t j = 0; (j < needed) && ((j + symbolPointerSection.reserved1) < indirectSymbols.size()); j++)
 			{
