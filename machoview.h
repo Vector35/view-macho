@@ -1273,6 +1273,8 @@ namespace BinaryNinja
 
 		bool dysymPresent = false;
 		bool dyldInfoPresent = false;
+		bool exportTriePresent = false;
+		bool chainedFixupsPresent = false;
 		bool routinesPresent = false;
 		bool functionStartsPresent = false;
 		bool relocatable = false;

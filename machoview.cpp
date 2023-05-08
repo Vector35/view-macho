@@ -689,6 +689,7 @@ MachOHeader MachoView::HeaderForAddress(BinaryView* data, uint64_t address, bool
 				m_logger->LogDebug("LC_DYLD_CHAINED_FIXUPS\n");
 				header.chainedFixups.dataoff = reader.Read32();
 				header.chainedFixups.datasize = reader.Read32();
+				header.chainedFixupsPresent = true;
 				break;
 			case LC_DYLD_INFO:
 			case LC_DYLD_INFO_ONLY:
@@ -705,12 +706,14 @@ MachOHeader MachoView::HeaderForAddress(BinaryView* data, uint64_t address, bool
 				header.dyldInfo.export_size = reader.Read32();
 				header.exportTrie.dataoff = header.dyldInfo.export_off;
 				header.exportTrie.datasize = header.dyldInfo.export_size;
+				header.exportTriePresent = true;
 				header.dyldInfoPresent = true;
 				break;
 			case LC_DYLD_EXPORTS_TRIE:
 				m_logger->LogDebug("LC_DYLD_EXPORTS_TRIE\n");
 				header.exportTrie.dataoff = reader.Read32();
 				header.exportTrie.datasize = reader.Read32();
+				header.exportTriePresent = true;
 				break;
 			case LC_THREAD:
 			case LC_UNIXTHREAD:
@@ -2530,15 +2533,24 @@ void MachoView::ParseSymbolTable(BinaryReader& reader, MachOHeader& header, cons
 	try
 	{
 		//First parse the imports
-		m_logger->LogDebug("Bind symbols");
-		ParseDynamicTable(reader, header, ImportAddressSymbol, header.dyldInfo.bind_off, header.dyldInfo.bind_size, GlobalBinding);
-		m_logger->LogDebug("Weak symbols");
-		ParseDynamicTable(reader, header, ImportAddressSymbol, header.dyldInfo.weak_bind_off, header.dyldInfo.weak_bind_size, WeakBinding);
-		m_logger->LogDebug("Lazy symbols");
-		ParseDynamicTable(reader, header, ImportAddressSymbol, header.dyldInfo.lazy_bind_off, header.dyldInfo.lazy_bind_size, GlobalBinding);
-		m_logger->LogDebug("Chained Fixups");
-		ParseChainedFixups(header.chainedFixups);
-		if (header.exportTrie.dataoff && header.isMainHeader)
+		if (header.dyldInfoPresent)
+		{
+			m_logger->LogDebug("Bind symbols");
+			ParseDynamicTable(reader, header, ImportAddressSymbol, header.dyldInfo.bind_off,
+					  header.dyldInfo.bind_size, GlobalBinding);
+			m_logger->LogDebug("Weak symbols");
+			ParseDynamicTable(reader, header, ImportAddressSymbol, header.dyldInfo.weak_bind_off,
+					  header.dyldInfo.weak_bind_size, WeakBinding);
+			m_logger->LogDebug("Lazy symbols");
+			ParseDynamicTable(reader, header, ImportAddressSymbol, header.dyldInfo.lazy_bind_off,
+					  header.dyldInfo.lazy_bind_size, GlobalBinding);
+		}
+		if (header.chainedFixupsPresent)
+		{
+			m_logger->LogDebug("Chained Fixups");
+			ParseChainedFixups(header.chainedFixups);
+		}
+		if (header.exportTriePresent && header.isMainHeader)
 			ParseExportTrie(reader, header.exportTrie);
 
 		//Then process the symtab
