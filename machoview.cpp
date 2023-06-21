@@ -1893,20 +1893,24 @@ bool MachoView::InitializeHeader(MachOHeader& header, bool isMainHeader, uint64_
 	{
 		vector<Ref<Metadata>> libraries;
 		vector<Ref<Metadata>> libraryFound;
-		for (auto& l : header.dylibs)
+		for (auto& libName : header.dylibs)
 		{
-			libraries.push_back(new Metadata(string(l)));
-			Ref<TypeLibrary> typeLib = GetTypeLibrary(l);
+			if (!GetExternalLibraryByName(libName))
+			{
+				AddExternalLibrary(libName, nullptr);
+			}
+			libraries.push_back(new Metadata(string(libName)));
+			Ref<TypeLibrary> typeLib = GetTypeLibrary(libName);
 			if (!typeLib)
 			{
-				vector<Ref<TypeLibrary>> typeLibs = platform->GetTypeLibrariesByName(l);
+				vector<Ref<TypeLibrary>> typeLibs = platform->GetTypeLibrariesByName(libName);
 				if (typeLibs.size())
 				{
 					typeLib = typeLibs[0];
 					AddTypeLibrary(typeLib);
 
 					m_logger->LogDebug("mach-o: adding type library for '%s': %s (%s)",
-						l.c_str(), typeLib->GetName().c_str(), typeLib->GetGuid().c_str());
+						libName.c_str(), typeLib->GetName().c_str(), typeLib->GetGuid().c_str());
 				}
 			}
 
