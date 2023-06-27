@@ -1895,9 +1895,9 @@ bool MachoView::InitializeHeader(MachOHeader& header, bool isMainHeader, uint64_
 		vector<Ref<Metadata>> libraryFound;
 		for (auto& libName : header.dylibs)
 		{
-			if (!GetExternalLibraryByName(libName))
+			if (!GetExternalLibrary(libName))
 			{
-				AddExternalLibrary(libName, nullptr);
+				AddExternalLibrary(libName, {}, true);
 			}
 			libraries.push_back(new Metadata(string(libName)));
 			Ref<TypeLibrary> typeLib = GetTypeLibrary(libName);
