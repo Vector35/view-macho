@@ -1064,18 +1064,6 @@ bool MachoView::ParseRelocationEntry(const relocation_info& info, uint64_t start
 bool MachoView::Init()
 {
 	Ref<Settings> settings = GetLoadSettings(GetTypeName());
-	if ((settings && ((settings->Contains("loader.macho.processFileset")
-		&& !settings->Get<bool>("loader.macho.processFileset", this))
-		|| !settings->Contains("loader.macho.processFileset")))
-		|| (!settings && !m_parseOnly))
-		if (m_header.ident.filetype == MH_FILESET)
-		{
-			m_logger->LogError("Unhandled Macho file class: 0x%x (MH_FILESET)", m_header.ident.filetype);
-			m_logger->LogError("This version of Binary Ninja includes experimental support for "
-					   "MH_FILESET binaries. You can enable it via the "
-					   "\"loader.macho.processFileset\" key in \"Open with Options\".");
-			return false;
-		}
 	std::chrono::steady_clock::time_point startTime = std::chrono::steady_clock::now();
 	BinaryReader reader(GetParentView());
 	reader.SetEndianness(m_endian);
@@ -3323,14 +3311,6 @@ Ref<Settings> MachoViewType::GetLoadSettingsForData(BinaryView* data)
 			"default" : true,
 			"description" : "Add function starts sourced from the Function Starts table to the core for analysis."
 			})");
-	settings->RegisterSetting("loader.macho.processFileset",
-			R"({
-			"title" : "MH_FILESET Processing (Experimental) ",
-			"type" : "boolean",
-			"default" : false,
-			"description" : "Enables processing for MH_FILESET binaries."
-			})");
-
 
 	if (viewRef->GetSectionByName("__thread_starts"))
 	{
