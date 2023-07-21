@@ -1751,15 +1751,49 @@ bool MachoView::InitializeHeader(MachOHeader& header, bool isMainHeader, uint64_
 			bool is64Bit;
 			string archName = UniversalViewType::ArchitectureToString(m_archId, 0, is64Bit);
 			if (!archName.empty())
+			{
+				#ifdef DEMO_VERSION
+				if ((archName == "arm64")			/* MACHO_CPU_TYPE_ARM64 */
+					|| (archName == "arm64v8")
+					|| (archName == "arm64e")
+					|| (archName == "arm64_32")		/* MACHO_CPU_TYPE_ARM64_32 */
+					|| (archName == "arm64_32v8")
+					|| (archName == "ppc")			/* MACHO_CPU_TYPE_POWERPC */
+					|| (archName == "ppc601")
+					|| (archName == "ppc602")
+					|| (archName == "ppc603")
+					|| (archName == "ppc603e")
+					|| (archName == "ppc603ev")
+					|| (archName == "ppc604")
+					|| (archName == "ppc604e")
+					|| (archName == "ppc620")
+					|| (archName == "ppc750")
+					|| (archName == "ppc7400")
+					|| (archName == "ppc7450")
+					|| (archName == "ppc970")
+					|| (archName == "ppc64")		/* MACHO_CPU_TYPE_POWERPC64 */
+					)
+				{
+					m_logger->LogError(
+						"Binary Ninja free does not support Mach-O architecture '%s'. "
+						"Purchase Binary Ninja to unlock all features.",
+						archName.c_str());
+					return false;
+				}
+				#endif
+
 				m_logger->LogError(
 					"Mach-O architecture '%s' is not explicitly supported. Try 'Open with Options' to manually select "
 				    "a compatible architecture.",
 					archName.c_str());
+			}
 			else
+			{
 				m_logger->LogError(
 					"Mach-O architecture 0x%x is not explicitly supported. Try 'Open with Options' to manually select "
 				    "a compatible architecture.",
 					m_archId);
+			}
 
 			return false;
 		}
