@@ -1325,6 +1325,7 @@ namespace BinaryNinja
 		bool m_relocatable = false;
 
 		bool m_extractMangledTypes;
+		bool m_simplifyTemplates;
 
 		SymbolQueue* m_symbolQueue = nullptr;
 		Ref<Logger> m_logger;

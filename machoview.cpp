@@ -213,9 +213,8 @@ MachoView::MachoView(const string& typeName, BinaryView* data, bool parseOnly): 
 	bool isUniversal = (universalViewType && universalViewType->IsTypeValidForData(data));
 
 	Ref<Settings> viewSettings = Settings::Instance();
-	m_extractMangledTypes = false;
-	if (viewSettings && viewSettings->Contains("analysis.extractTypesFromMangledNames"))
-		m_extractMangledTypes = viewSettings->Get<bool>("analysis.extractTypesFromMangledNames", data);
+	m_extractMangledTypes = viewSettings->Get<bool>("analysis.extractTypesFromMangledNames", data);
+	m_simplifyTemplates = viewSettings->Get<bool>("analysis.types.templateSimplifier", data);
 
 	Ref<Settings> settings = data->GetLoadSettings(typeName);
 	if (settings && settings->Contains("loader.macho.universalImageOffset"))
@@ -2281,7 +2280,7 @@ Ref<Symbol> MachoView::DefineMachoSymbol(
 			if (IsGNU3MangledString(rawName))
 			{
 				Ref<Type> demangledType;
-				if (DemangleGNU3(m_arch, rawName, demangledType, varName, this))
+				if (DemangleGNU3(m_arch, rawName, demangledType, varName, m_simplifyTemplates))
 				{
 					shortName = varName.GetString();
 					fullName = shortName;
