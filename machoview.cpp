@@ -976,6 +976,12 @@ void MachoView::ParseFunctionStarts(Platform* platform, uint64_t textBase, funct
 	reader.SetVirtualBase(m_universalImageOffset);
 	try
 	{
+		if (m_header.ident.filetype == MH_DSYM)
+		{
+			m_logger->LogDebug("Skipping LC_FUNCTION_STARTS parsing");
+			return;
+		}
+
 		reader.Seek(functionStarts.funcoff);
 		DataBuffer buffer = reader.Read(functionStarts.funcsize);
 		size_t i = 0;
@@ -2517,6 +2523,12 @@ void MachoView::ParseDynamicTable(BinaryReader& reader, MachOHeader& header, BNS
 
 void MachoView::ParseSymbolTable(BinaryReader& reader, MachOHeader& header, const symtab_command& symtab, const vector<uint32_t>& indirectSymbols)
 {
+	if (header.ident.filetype == MH_DSYM)
+	{
+		m_logger->LogDebug("Skipping symbol parsing");
+		return;
+	}
+
 	try
 	{
 		//First parse the imports
