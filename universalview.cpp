@@ -361,6 +361,7 @@ bool UniversalView::Init()
 	{
 		Settings::Instance()->Set("analysis.linearSweep.autorun", false, this);
 		Settings::Instance()->Set("analysis.signatureMatcher.autorun", false, this);
+		Settings::Instance()->Set("analysis.pointerSweep.autorun", false, this);
 	}
 
 	AddAutoSegment(0, GetParentView()->GetLength(), 0, GetParentView()->GetLength(), SegmentReadable | SegmentWritable);
