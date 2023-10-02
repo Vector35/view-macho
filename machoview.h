@@ -1284,6 +1284,7 @@ namespace BinaryNinja
 	{
 		MachOHeader m_header;
 		std::map<uint64_t, MachOHeader> m_subHeaders; // Used for MH_FILESET entries.
+		std::unordered_map<std::string, uint64_t> m_subHeaderAddressForID;
 
 		struct HeaderQualifiedNames {
 			QualifiedName cpuTypeEnumQualName;
@@ -1364,6 +1365,7 @@ namespace BinaryNinja
 		MachoView(const std::string& typeName, BinaryView* data, bool parseOnly = false);
 
 		virtual bool Init() override;
+		const MachOHeader& PrimaryHeader() { return m_header; };
 	};
 
 	class MachoViewType: public BinaryViewType

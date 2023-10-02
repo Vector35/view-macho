@@ -841,6 +841,7 @@ MachOHeader MachoView::HeaderForAddress(BinaryView* data, uint64_t address, bool
 					MachOHeader subHeader = HeaderForAddress(data, fAddr, false, identPrefix);
 					subHeader.textBase = vmAddr;
 					m_subHeaders[vmAddr] = subHeader;
+					m_subHeaderAddressForID[identPrefix] = vmAddr;
 				}
 				else {
 					throw ReadException();
@@ -1069,6 +1070,14 @@ bool MachoView::ParseRelocationEntry(const relocation_info& info, uint64_t start
 bool MachoView::Init()
 {
 	Ref<Settings> settings = GetLoadSettings(GetTypeName());
+	bool loadOnlyKernelImage = false;
+	if (settings && !m_parseOnly && m_header.ident.filetype == MH_FILESET && settings->Contains("loader.macho.processFilesetMode"))
+	{
+		// "Full Kernel + Kexts", "Kernel Only"
+		auto settingString = settings->Get<std::string>("loader.macho.processFilesetMode", this);
+		if (settingString == "Kernel Only")
+			loadOnlyKernelImage = true;
+	}
 	std::chrono::steady_clock::time_point startTime = std::chrono::steady_clock::now();
 	BinaryReader reader(GetParentView());
 	reader.SetEndianness(m_endian);
@@ -1529,10 +1538,28 @@ bool MachoView::Init()
 	if (!InitializeHeader(m_header, true, preferredImageBase, preferredImageBaseDesc))
 		return false;
 
-	for (auto& it : m_subHeaders)
+	if (loadOnlyKernelImage)
 	{
-		if (!InitializeHeader(it.second, false, it.first, ""))
+		if (const auto& it = m_subHeaderAddressForID.find("com.apple.kernel"); it != m_subHeaderAddressForID.end())
+		{
+			if (const auto& headerIt = m_subHeaders.find(it->second); headerIt != m_subHeaders.end())
+			{
+				if (!InitializeHeader(headerIt->second, false, headerIt->first, ""))
+					return false;
+			}
+			else
+				return false;
+		}
+		else
 			return false;
+	}
+	else
+	{
+		for (auto& it : m_subHeaders)
+		{
+			if (!InitializeHeader(it.second, false, it.first, ""))
+				return false;
+		}
 	}
 
 	std::chrono::steady_clock::time_point endTime = std::chrono::steady_clock::now();
@@ -1581,8 +1608,22 @@ bool MachoView::InitializeHeader(MachOHeader& header, bool isMainHeader, uint64_
 			}
 		}
 	}
-
-	if (!(m_header.ident.filetype == MH_FILESET && isMainHeader)) \
+	if (m_header.ident.filetype == MH_FILESET && isMainHeader)
+	{
+		for (auto& segment : header.segments)
+		{
+			char segmentName[17];
+			memcpy(segmentName, segment.segname, sizeof(segment.segname));
+			segmentName[16] = 0;
+			if (strcmp(segmentName, "__TEXT") == 0)
+			{
+				AddAutoSegment(segment.vmaddr, segment.vmsize, segment.fileoff, segment.filesize, SegmentReadable | SegmentExecutable);
+				AddAutoSection("__TEXT", segment.vmaddr, segment.vmsize);
+				break;
+			}
+		}
+	}
+	else
 	{
 		for (auto &segment: header.segments) {
 			if ((segment.initprot == MACHO_VM_PROT_NONE) || (!segment.vmsize))
@@ -3366,6 +3407,24 @@ Ref<Settings> MachoViewType::GetLoadSettingsForData(BinaryView* data)
 				"default" : true,
 				"description" : "Add relocation entries to rebase chained thread starts located in the __thread_starts section."
 				})");
+	}
+
+	if (auto machoView = dynamic_cast<MachoView*>(viewRef.GetPtr()))
+	{
+		if (machoView->PrimaryHeader().ident.filetype == MH_FILESET)
+		{
+			settings->RegisterSetting("loader.macho.processFilesetMode",
+				R":({
+				"title" : "MH_FILESET Processing Mode",
+				"type" : "string",
+				"default" : "Full Kernel + Kexts",
+				"enum" : ["Full Kernel + Kexts", "Kernel Only"],
+				"enumDescriptions" : [
+					"Load full kernel and kexts and run analysis",
+					"Load only the kernel (com.apple.kernel) image and run analysis"],
+				"description" : "File processing mode for MH_FILESET binaries"
+			}):");
+		}
 	}
 
 	// Merge existing load settings if they exist. This allows for the selection of a specific object file from a Mach-O Universal file.
