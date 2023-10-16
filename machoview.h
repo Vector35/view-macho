@@ -3,6 +3,7 @@
 #include <exception>
 #include <vector>
 #include <string.h>
+#include "objc.h"
 
 #include "binaryninjaapi.h"
 
@@ -1309,6 +1310,8 @@ namespace BinaryNinja
 			QualifiedName dylibCommandQualName;
 			QualifiedName filesetEntryCommandQualName;
 		} m_typeNames;
+
+		ObjCProcessor* m_objcProcessor;
 
 		uint64_t m_universalImageOffset;
 		bool m_parseOnly, m_backedByDatabase;

@@ -2244,6 +2244,19 @@ bool MachoView::InitializeHeader(MachOHeader& header, bool isMainHeader, uint64_
 		}
 	}
 
+	bool parseObjCStructs = true;
+	if (settings && settings->Contains("loader.macho.processObjectiveC"))
+		parseObjCStructs = settings->Get<bool>("loader.macho.processObjectiveC", this);
+	if (parseObjCStructs)
+	{
+		try {
+			m_objcProcessor = new ObjCProcessor(this);
+		}
+		catch (...)
+		{
+			m_logger->LogError("Failed to process Objective-C Metadata. Binary may be malformed");
+		}
+	}
 
 	return true;
 }
@@ -3346,6 +3359,17 @@ Ref<Settings> MachoViewType::GetLoadSettingsForData(BinaryView* data)
 	{
 		if (settings->Contains(override))
 			settings->UpdateProperty(override, "readOnly", false);
+	}
+
+	if (ObjCProcessor::ViewHasObjCMetadata(viewRef))
+	{
+		settings->RegisterSetting("loader.macho.processObjectiveC",
+			R"({
+			"title" : "Process Objective-C metadata",
+			"type" : "boolean",
+			"default" : true,
+			"description" : "Processes Objective-C structures, applying method names and types from encoded metadata"
+			})");
 	}
 
 	// register additional settings
