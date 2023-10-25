@@ -1227,13 +1227,6 @@ namespace BinaryNinja
 	};
 #endif
 
-	struct ExportNode
-	{
-		std::string text;
-		uint64_t offset;
-		uint64_t flags;
-	};
-
 	struct MachOHeader {
 		bool isMainHeader;
 
@@ -1345,7 +1338,7 @@ namespace BinaryNinja
 		bool ParseRelocationEntry(const relocation_info& info, uint64_t start, BNRelocationInfo& result);
 
 		void ParseExportTrie(BinaryReader& reader, linkedit_data_command exportTrie);
-		void ReadExportNode(DataBuffer& buffer, std::vector<ExportNode>& results, const std::string& currentText,
+		void ReadExportNode(uint64_t viewStart, DataBuffer& buffer, const std::string& currentText,
 			size_t cursor, uint32_t endGuard);
 
 		void ParseDynamicTable(BinaryReader& reader, MachOHeader& header, BNSymbolType type, uint32_t tableOffset, uint32_t tableSize,

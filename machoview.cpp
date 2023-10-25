@@ -2392,18 +2392,7 @@ void MachoView::ParseExportTrie(BinaryReader& reader, linkedit_data_command expo
 		uint32_t endGuard = exportTrie.datasize;
 		DataBuffer buffer = GetParentView()->ReadBuffer(m_universalImageOffset + exportTrie.dataoff, exportTrie.datasize);
 
-		std::vector<ExportNode> nodes;
-		ReadExportNode(buffer, nodes, "", 0, endGuard);
-
-		for (auto node : nodes)
-		{
-			// m_logger->LogError("%s: 0x%llx", node.text.c_str(), node.offset);
-			if ((!node.text.empty()))
-			{
-				uint64_t addr = node.offset + GetStart();
-				DefineMachoSymbol(DataSymbol, node.text, addr, GlobalBinding, false);
-			}
-		}
+		ReadExportNode(GetStart(), buffer, "", 0, endGuard);
 	}
 	catch (ReadException&)
 	{
@@ -2411,21 +2400,23 @@ void MachoView::ParseExportTrie(BinaryReader& reader, linkedit_data_command expo
 	}
 }
 
-void MachoView::ReadExportNode(DataBuffer& buffer, std::vector<ExportNode>& results, const std::string& currentText, size_t cursor, uint32_t endGuard)
+void MachoView::ReadExportNode(uint64_t viewStart, DataBuffer& buffer, const std::string& currentText, size_t cursor, uint32_t endGuard)
 {
 	if (cursor > endGuard)
 		throw ReadException();
 
 	uint64_t terminalSize = readValidULEB128(buffer, cursor);
+	uint64_t childOffset = cursor + terminalSize;
 	if (terminalSize != 0) {
 		uint64_t imageOffset = 0;
 		uint64_t flags = readValidULEB128(buffer, cursor);
 		if (!(flags & EXPORT_SYMBOL_FLAGS_REEXPORT))
 		{
 			imageOffset = readValidULEB128(buffer, cursor);
-			results.push_back({currentText, imageOffset, flags});
+			DefineMachoSymbol(DataSymbol, currentText, imageOffset + viewStart, GlobalBinding, true);
 		}
 	}
+	cursor = childOffset;
 	uint8_t childCount = buffer[cursor];
 	cursor++;
 	if (cursor > endGuard)
@@ -2441,7 +2432,7 @@ void MachoView::ReadExportNode(DataBuffer& buffer, std::vector<ExportNode>& resu
 		auto next = readValidULEB128(buffer, cursor);
 		if (next == 0)
 			throw ReadException();
-		ReadExportNode(buffer, results, currentText + childText, next, endGuard);
+		ReadExportNode(viewStart, buffer, currentText + childText, next, endGuard);
 	}
 }
 
