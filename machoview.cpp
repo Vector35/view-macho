@@ -2966,8 +2966,8 @@ void MachoView::ParseChainedFixups(linkedit_data_command chainedFixups)
 							pageStartSubStarts.push_back(subPageStart & ~DYLD_CHAINED_PTR_START_LAST);
 							done = true;
 						}
-						pageStartOffsets.push_back(pageStartSubStarts);
 					}
+					pageStartOffsets.push_back(pageStartSubStarts);
 				}
 				else
 				{
