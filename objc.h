@@ -161,11 +161,14 @@ namespace BinaryNinja {
 		std::unordered_map<uint64_t, std::string> m_selectorCache;
 		std::unordered_map<uint64_t, Method> m_localMethods;
 
-		// Required for workflow_objc type guessing, should be removed when that is no longer a thing.
+		// Required for workflow_objc type heuristics, should be removed when that is no longer a thing.
 		std::map<uint64_t, std::string> m_selRefToName;
 		std::map<uint64_t, std::vector<uint64_t>> m_selRefToImplementations;
 		std::map<uint64_t, std::vector<uint64_t>> m_selToImplementations;
 		// --
+
+		uint64_t ReadPointerAccountingForRelocations(BinaryReader* reader);
+		std::unordered_map<uint64_t, uint64_t> m_relocationPointerRewrites;
 
 		static Ref<Metadata> SerializeMethod(uint64_t loc, const Method& method);
 		static Ref<Metadata> SerializeClass(uint64_t loc, const Class& cls);
@@ -185,6 +188,8 @@ namespace BinaryNinja {
 	public:
 		static bool ViewHasObjCMetadata(BinaryView* data);
 		ObjCProcessor(BinaryView* data);
+		void ProcessObjCData();
+		void AddRelocatedPointer(uint64_t location, uint64_t rewrite);
 	};
 }
 

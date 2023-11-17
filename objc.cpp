@@ -349,15 +349,15 @@ void ObjCProcessor::LoadClasses(BinaryReader* reader, Ref<Section> classPtrSecti
 		view_ptr_t classPointerLocation = classPtrSectionStart + (i * m_data->GetAddressSize());
 		reader->Seek(classPointerLocation);
 
-		classPtr = reader->ReadPointer();
+		classPtr = ReadPointerAccountingForRelocations(reader);
 		reader->Seek(classPtr);
 		try
 		{
-			clsStruct.isa = reader->ReadPointer();
+			clsStruct.isa = ReadPointerAccountingForRelocations(reader);
 			clsStruct.super = reader->ReadPointer();
 			clsStruct.cache = reader->ReadPointer();
 			clsStruct.vtable = reader->ReadPointer();
-			clsStruct.data = reader->ReadPointer();
+			clsStruct.data = ReadPointerAccountingForRelocations(reader);
 		}
 		catch (ReadException& ex)
 		{
@@ -379,13 +379,13 @@ void ObjCProcessor::LoadClasses(BinaryReader* reader, Ref<Section> classPtrSecti
 			classRO.instanceSize = reader->Read32();
 			if (m_data->GetAddressSize() == 8)
 				classRO.reserved = reader->Read32();
-			classRO.ivarLayout = reader->ReadPointer();
-			classRO.name = reader->ReadPointer();
-			classRO.baseMethods = reader->ReadPointer();
-			classRO.baseProtocols = reader->ReadPointer();
-			classRO.ivars = reader->ReadPointer();
-			classRO.weakIvarLayout = reader->ReadPointer();
-			classRO.baseProperties = reader->ReadPointer();
+			classRO.ivarLayout = ReadPointerAccountingForRelocations(reader);
+			classRO.name = ReadPointerAccountingForRelocations(reader);
+			classRO.baseMethods = ReadPointerAccountingForRelocations(reader);
+			classRO.baseProtocols = ReadPointerAccountingForRelocations(reader);
+			classRO.ivars = ReadPointerAccountingForRelocations(reader);
+			classRO.weakIvarLayout = ReadPointerAccountingForRelocations(reader);
+			classRO.baseProperties = ReadPointerAccountingForRelocations(reader);
 		}
 		catch (ReadException& ex)
 		{
@@ -427,11 +427,11 @@ void ObjCProcessor::LoadClasses(BinaryReader* reader, Ref<Section> classPtrSecti
 			reader->Seek(clsStruct.isa);
 			try
 			{
-				metaClsStruct.isa = reader->ReadPointer();
+				metaClsStruct.isa = ReadPointerAccountingForRelocations(reader);
 				metaClsStruct.super = reader->ReadPointer();
 				metaClsStruct.cache = reader->ReadPointer();
 				metaClsStruct.vtable = reader->ReadPointer();
-				metaClsStruct.data = reader->ReadPointer() & ~1;
+				metaClsStruct.data = ReadPointerAccountingForRelocations(reader) & ~1;
 				DefineObjCSymbol(BNSymbolType::DataSymbol, m_typeNames.cls, "metacls_" + name, clsStruct.isa, true);
 				hasValidMetaClass = true;
 			}
@@ -456,13 +456,13 @@ void ObjCProcessor::LoadClasses(BinaryReader* reader, Ref<Section> classPtrSecti
 				metaClassRO.instanceSize = reader->Read32();
 				if (m_data->GetAddressSize() == 8)
 					metaClassRO.reserved = reader->Read32();
-				metaClassRO.ivarLayout = reader->ReadPointer();
-				metaClassRO.name = reader->ReadPointer();
-				metaClassRO.baseMethods = reader->ReadPointer();
-				metaClassRO.baseProtocols = reader->ReadPointer();
-				metaClassRO.ivars = reader->ReadPointer();
-				metaClassRO.weakIvarLayout = reader->ReadPointer();
-				metaClassRO.baseProperties = reader->ReadPointer();
+				metaClassRO.ivarLayout = ReadPointerAccountingForRelocations(reader);
+				metaClassRO.name = ReadPointerAccountingForRelocations(reader);
+				metaClassRO.baseMethods = ReadPointerAccountingForRelocations(reader);
+				metaClassRO.baseProtocols = ReadPointerAccountingForRelocations(reader);
+				metaClassRO.ivars = ReadPointerAccountingForRelocations(reader);
+				metaClassRO.weakIvarLayout = ReadPointerAccountingForRelocations(reader);
+				metaClassRO.baseProperties = ReadPointerAccountingForRelocations(reader);
 				DefineObjCSymbol(
 					BNSymbolType::DataSymbol, m_typeNames.classRO, "metacls_ro_" + name, metaClsStruct.data, true);
 				hasValidMetaClassRO = true;
@@ -534,17 +534,17 @@ void ObjCProcessor::LoadCategories(BinaryReader* reader, Ref<Section> classPtrSe
 
 		reader->Seek(i);
 		m_data->DefineDataVariable(i, ptrType);
-		auto catLocation = reader->ReadPointer();
+		auto catLocation = ReadPointerAccountingForRelocations(reader);
 		reader->Seek(catLocation);
 
 		try
 		{
-			cat.name = reader->ReadPointer();
-			cat.cls = reader->ReadPointer();
-			cat.instanceMethods = reader->ReadPointer();
-			cat.classMethods = reader->ReadPointer();
-			cat.protocols = reader->ReadPointer();
-			cat.instanceProperties = reader->ReadPointer();
+			cat.name = ReadPointerAccountingForRelocations(reader);
+			cat.cls = ReadPointerAccountingForRelocations(reader);
+			cat.instanceMethods = ReadPointerAccountingForRelocations(reader);
+			cat.classMethods = ReadPointerAccountingForRelocations(reader);
+			cat.protocols = ReadPointerAccountingForRelocations(reader);
+			cat.instanceProperties = ReadPointerAccountingForRelocations(reader);
 		}
 		catch (ReadException& ex)
 		{
@@ -651,9 +651,9 @@ void ObjCProcessor::ReadMethodList(BinaryReader* reader, ClassBase& cls, std::st
 			}
 			else
 			{
-				meth.name = reader->ReadPointer();
-				meth.types = reader->ReadPointer();
-				meth.imp = reader->ReadPointer();
+				meth.name = ReadPointerAccountingForRelocations(reader);
+				meth.types = ReadPointerAccountingForRelocations(reader);
+				meth.imp = ReadPointerAccountingForRelocations(reader);
 			}
 			if (!relativeOffsets || directSelectors)
 			{
@@ -669,7 +669,7 @@ void ObjCProcessor::ReadMethodList(BinaryReader* reader, ClassBase& cls, std::st
 				view_ptr_t selRef;
 				reader->Seek(meth.name);
 				selRefAddr = meth.name;
-				selRef = reader->ReadPointer();
+				selRef = ReadPointerAccountingForRelocations(reader);
 				selAddr = selRef;
 				if (const auto& it = m_selectorCache.find(selRef); it != m_selectorCache.end())
 					method.name = it->second;
@@ -723,9 +723,9 @@ void ObjCProcessor::ReadIvarList(BinaryReader* reader, ClassBase& cls, std::stri
 			ivar_t ivarStruct;
 			uint64_t cursor = start + (sizeof(ivar_list_t)) + (i * ((addressSize * 3) + 8));
 			reader->Seek(cursor);
-			ivarStruct.offset = reader->ReadPointer();
-			ivarStruct.name = reader->ReadPointer();
-			ivarStruct.type = reader->ReadPointer();
+			ivarStruct.offset = ReadPointerAccountingForRelocations(reader);
+			ivarStruct.name = ReadPointerAccountingForRelocations(reader);
+			ivarStruct.type = ReadPointerAccountingForRelocations(reader);
 			ivarStruct.alignmentRaw = reader->Read32();
 			ivarStruct.size = reader->Read32();
 
@@ -913,7 +913,7 @@ void ObjCProcessor::PostProcessObjCSections(BinaryReader* reader)
 		for (view_ptr_t i = start; i < end; i += ptrSize)
 		{
 			reader->Seek(i);
-			auto selLoc = reader->ReadPointer();
+			auto selLoc = ReadPointerAccountingForRelocations(reader);
 			std::string sel;
 			if (const auto& it = m_selectorCache.find(selLoc); it != m_selectorCache.end())
 				sel = it->second;
@@ -959,50 +959,64 @@ void ObjCProcessor::PostProcessObjCSections(BinaryReader* reader)
 	}
 }
 
+uint64_t ObjCProcessor::ReadPointerAccountingForRelocations(BinaryReader* reader)
+{
+	if (auto it = m_relocationPointerRewrites.find(reader->GetOffset()); it != m_relocationPointerRewrites.end())
+	{
+		reader->SeekRelative(m_data->GetAddressSize());
+		return it->second;
+	}
+	return reader->ReadPointer();
+}
+
+
 ObjCProcessor::ObjCProcessor(BinaryNinja::BinaryView* data) : m_data(data)
 {
 	m_logger = m_data->CreateLogger("macho.objc");
 	m_symbolQueue = new SymbolQueue();
+}
 
-	auto addrSize = data->GetAddressSize();
+void ObjCProcessor::ProcessObjCData()
+{
+	auto addrSize = m_data->GetAddressSize();
 
-	m_typeNames.relativePtr = defineTypedef(data, {"rptr_t"}, Type::IntegerType(4, true));
+	m_typeNames.relativePtr = defineTypedef(m_data, {"rptr_t"}, Type::IntegerType(4, true));
 	auto rptr_t = Type::NamedType(m_data, m_typeNames.relativePtr);
 
-	m_typeNames.id = defineTypedef(data, {"id"}, Type::PointerType(addrSize, Type::VoidType()));
-	m_typeNames.sel = defineTypedef(data, {"SEL"}, Type::PointerType(addrSize, Type::IntegerType(1, false)));
+	m_typeNames.id = defineTypedef(m_data, {"id"}, Type::PointerType(addrSize, Type::VoidType()));
+	m_typeNames.sel = defineTypedef(m_data, {"SEL"}, Type::PointerType(addrSize, Type::IntegerType(1, false)));
 
-	m_typeNames.BOOL = defineTypedef(data, {"BOOL"}, Type::IntegerType(1, false));
-	m_typeNames.nsInteger = defineTypedef(data, {"NSInteger"}, Type::IntegerType(addrSize, true));
-	m_typeNames.nsuInteger = defineTypedef(data, {"NSUInteger"}, Type::IntegerType(addrSize, false));
-	m_typeNames.cgFloat = defineTypedef(data, {"CGFloat"}, Type::FloatType(addrSize));
+	m_typeNames.BOOL = defineTypedef(m_data, {"BOOL"}, Type::IntegerType(1, false));
+	m_typeNames.nsInteger = defineTypedef(m_data, {"NSInteger"}, Type::IntegerType(addrSize, true));
+	m_typeNames.nsuInteger = defineTypedef(m_data, {"NSUInteger"}, Type::IntegerType(addrSize, false));
+	m_typeNames.cgFloat = defineTypedef(m_data, {"CGFloat"}, Type::FloatType(addrSize));
 
 	StructureBuilder cfstringStructBuilder;
 	cfstringStructBuilder.AddMember(Type::PointerType(addrSize, Type::VoidType()), "isa");
 	cfstringStructBuilder.AddMember(Type::IntegerType(addrSize, false), "flags");
-	cfstringStructBuilder.AddMember(Type::PointerType(addrSize, Type::VoidType()), "data");
+	cfstringStructBuilder.AddMember(Type::PointerType(addrSize, Type::VoidType()), "m_data");
 	cfstringStructBuilder.AddMember(Type::IntegerType(addrSize, false), "size");
-	auto type = finalizeStructureBuilder(data, cfstringStructBuilder, "CFString");
+	auto type = finalizeStructureBuilder(m_data, cfstringStructBuilder, "CFString");
 	m_typeNames.cfString = type.first;
 
 	StructureBuilder methodEntry;
 	methodEntry.AddMember(rptr_t, "name");
 	methodEntry.AddMember(rptr_t, "types");
 	methodEntry.AddMember(rptr_t, "imp");
-	type = finalizeStructureBuilder(data, methodEntry, "objc_method_entry_t");
+	type = finalizeStructureBuilder(m_data, methodEntry, "objc_method_entry_t");
 	m_typeNames.methodEntry = type.first;
 
 	StructureBuilder method;
 	method.AddMember(Type::PointerType(addrSize, Type::VoidType()), "name");
 	method.AddMember(Type::PointerType(addrSize, Type::VoidType()), "types");
 	method.AddMember(Type::PointerType(addrSize, Type::VoidType()), "imp");
-	type = finalizeStructureBuilder(data, method, "objc_method_t");
+	type = finalizeStructureBuilder(m_data, method, "objc_method_t");
 	m_typeNames.method = type.first;
 
 	StructureBuilder methList;
 	methList.AddMember(Type::IntegerType(4, false), "obsolete");
 	methList.AddMember(Type::IntegerType(4, false), "count");
-	type = finalizeStructureBuilder(data, methList, "objc_method_list_t");
+	type = finalizeStructureBuilder(m_data, methList, "objc_method_list_t");
 	m_typeNames.methodList = type.first;
 
 	StructureBuilder ivarBuilder;
@@ -1011,13 +1025,13 @@ ObjCProcessor::ObjCProcessor(BinaryNinja::BinaryView* data) : m_data(data)
 	ivarBuilder.AddMember(Type::PointerType(addrSize, Type::IntegerType(1, true)), "type");
 	ivarBuilder.AddMember(Type::IntegerType(4, false), "alignment");
 	ivarBuilder.AddMember(Type::IntegerType(4, false), "size");
-	type = finalizeStructureBuilder(data, ivarBuilder, "objc_ivar_t");
+	type = finalizeStructureBuilder(m_data, ivarBuilder, "objc_ivar_t");
 	m_typeNames.ivar = type.first;
 
 	StructureBuilder ivarList;
 	ivarList.AddMember(Type::IntegerType(4, false), "entsize");
 	ivarList.AddMember(Type::IntegerType(4, false), "count");
-	type = finalizeStructureBuilder(data, ivarList, "objc_ivar_list_t");
+	type = finalizeStructureBuilder(m_data, ivarList, "objc_ivar_list_t");
 	m_typeNames.ivarList = type.first;
 
 	StructureBuilder classROBuilder;
@@ -1033,7 +1047,7 @@ ObjCProcessor::ObjCProcessor(BinaryNinja::BinaryView* data) : m_data(data)
 	classROBuilder.AddMember(Type::PointerType(addrSize, Type::NamedType(m_data, m_typeNames.ivarList)), "ivars");
 	classROBuilder.AddMember(Type::PointerType(addrSize, Type::VoidType()), "weak_ivar_layout");
 	classROBuilder.AddMember(Type::PointerType(addrSize, Type::VoidType()), "properties");
-	type = finalizeStructureBuilder(data, classROBuilder, "objc_class_ro_t");
+	type = finalizeStructureBuilder(m_data, classROBuilder, "objc_class_ro_t");
 	m_typeNames.classRO = type.first;
 
 	QualifiedName classTypeName("objc_class_t");
@@ -1066,8 +1080,7 @@ ObjCProcessor::ObjCProcessor(BinaryNinja::BinaryView* data) : m_data(data)
 	categoryBuilder.AddMember(Type::PointerType(addrSize, Type::VoidType()), "protocols");
 	categoryBuilder.AddMember(Type::PointerType(addrSize, Type::VoidType()), "properties");
 	m_typeNames.category = finalizeStructureBuilder(m_data, categoryBuilder, "objc_category_t").first;
-
-	auto reader = new BinaryReader(data);
+	auto reader = new BinaryReader(m_data);
 	m_data->BeginBulkModifySymbols();
 	if (auto classList = m_data->GetSectionByName("__objc_classlist"))
 		LoadClasses(reader, classList);
@@ -1092,4 +1105,11 @@ ObjCProcessor::ObjCProcessor(BinaryNinja::BinaryView* data) : m_data(data)
 
 	auto meta = SerializeMetadata();
 	m_data->StoreMetadata("Objective-C", meta, true);
+
+	m_relocationPointerRewrites.clear();
+}
+
+void ObjCProcessor::AddRelocatedPointer(uint64_t location, uint64_t rewrite)
+{
+	m_relocationPointerRewrites[location] = rewrite;
 }

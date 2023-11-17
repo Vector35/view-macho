@@ -1546,6 +1546,14 @@ bool MachoView::InitializeHeader(MachOHeader& header, bool isMainHeader, uint64_
 {
 	Ref<Settings> settings = GetLoadSettings(GetTypeName());
 
+	bool parseObjCStructs = true;
+	if (settings && settings->Contains("loader.macho.processObjectiveC"))
+		parseObjCStructs = settings->Get<bool>("loader.macho.processObjectiveC", this);
+	if (parseObjCStructs)
+	{
+		m_objcProcessor = new ObjCProcessor(this);
+	}
+
 	for (auto& i : header.segments)
 		i.vmaddr += m_imageBaseAdjustment;
 
@@ -2244,18 +2252,16 @@ bool MachoView::InitializeHeader(MachOHeader& header, bool isMainHeader, uint64_
 		}
 	}
 
-	bool parseObjCStructs = true;
-	if (settings && settings->Contains("loader.macho.processObjectiveC"))
-		parseObjCStructs = settings->Get<bool>("loader.macho.processObjectiveC", this);
 	if (parseObjCStructs)
 	{
 		try {
-			m_objcProcessor = new ObjCProcessor(this);
+			m_objcProcessor->ProcessObjCData();
 		}
 		catch (...)
 		{
 			m_logger->LogError("Failed to process Objective-C Metadata. Binary may be malformed");
 		}
+		delete m_objcProcessor;
 	}
 
 	return true;
@@ -3150,6 +3156,10 @@ void MachoView::ParseChainedFixups(linkedit_data_command chainedFixups)
 
 							reloc.address = GetStart() + (chainEntryAddress - m_universalImageOffset);
 							DefineRelocation(m_arch, reloc, entryOffset, reloc.address);
+							if (m_objcProcessor)
+							{
+								m_objcProcessor->AddRelocatedPointer(reloc.address, entryOffset);
+							}
 						}
 
 						chainEntryAddress += (nextEntryStrideCount * strideSize);
