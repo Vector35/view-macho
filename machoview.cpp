@@ -1097,6 +1097,7 @@ bool MachoView::Init()
 		}
 	}
 
+	SetOriginalBase(initialImageBase);
 	uint64_t preferredImageBase = initialImageBase;
 	if (settings && settings->Contains("loader.imageBase") && settings->Contains("loader.architecture")) // handle overrides
 	{
