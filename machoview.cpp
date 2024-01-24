@@ -1961,6 +1961,17 @@ bool MachoView::InitializeHeader(MachOHeader& header, bool isMainHeader, uint64_
 		m_logger->LogError("Failed to read indirect symbol data");
 	}
 
+	bool parseFunctionStarts = true;
+	if (settings && settings->Contains("loader.macho.processFunctionStarts"))
+		parseFunctionStarts = settings->Get<bool>("loader.macho.processFunctionStarts", this);
+
+	if (parseFunctionStarts)
+	{
+		m_logger->LogDebug("Parsing function starts\n");
+		if (header.functionStartsPresent)
+			ParseFunctionStarts(platform, header.textBase, header.functionStarts);
+	}
+
 	BeginBulkModifySymbols();
 	m_symbolQueue = new SymbolQueue();
 
@@ -1980,17 +1991,6 @@ bool MachoView::InitializeHeader(MachOHeader& header, bool isMainHeader, uint64_
 	m_symbolQueue = nullptr;
 
 	EndBulkModifySymbols();
-
-	bool parseFunctionStarts = true;
-	if (settings && settings->Contains("loader.macho.processFunctionStarts"))
-		parseFunctionStarts = settings->Get<bool>("loader.macho.processFunctionStarts", this);
-
-	if (parseFunctionStarts)
-	{
-		m_logger->LogDebug("Parsing function starts\n");
-		if (header.functionStartsPresent)
-			ParseFunctionStarts(platform, header.textBase, header.functionStarts);
-	}
 
 	auto relocationHandler = m_arch->GetRelocationHandler("Mach-O");
 	if (relocationHandler)
@@ -2418,7 +2418,8 @@ void MachoView::ReadExportNode(uint64_t viewStart, DataBuffer& buffer, const std
 		if (!(flags & EXPORT_SYMBOL_FLAGS_REEXPORT))
 		{
 			imageOffset = readValidULEB128(buffer, cursor);
-			DefineMachoSymbol(DataSymbol, currentText, imageOffset + viewStart, GlobalBinding, true);
+			auto symbolType = GetAnalysisFunctionsForAddress(viewStart + imageOffset).size() ? FunctionSymbol : DataSymbol;
+			DefineMachoSymbol(symbolType, currentText, imageOffset + viewStart, GlobalBinding, true);
 		}
 	}
 	cursor = childOffset;
