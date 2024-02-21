@@ -2731,6 +2731,12 @@ void MachoView::ParseSymbolTable(BinaryReader& reader, MachOHeader& header, cons
 				symbolObj = DefineMachoSymbol(type, symbol, sym.n_value, GlobalBinding, deferred);
 			}
 
+			if (!symbolObj)
+			{
+				LogError("Failed to create symbol '%s' at 0x%lx from symbol table", symbol.c_str(), sym.n_value);
+				continue;
+			}
+
 			if (stubSymbolIter != stubSymbols.end())
 			{
 				for (auto& j : stubSymbolIter->second)
