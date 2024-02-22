@@ -2733,7 +2733,6 @@ void MachoView::ParseSymbolTable(BinaryReader& reader, MachOHeader& header, cons
 
 			if (!symbolObj)
 			{
-				LogError("Failed to create symbol '%s' at 0x%lx from symbol table", symbol.c_str(), sym.n_value);
 				continue;
 			}
 
