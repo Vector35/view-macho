@@ -1583,47 +1583,52 @@ bool MachoView::InitializeHeader(MachOHeader& header, bool isMainHeader, uint64_
 		}
 	}
 
-	if (!(m_header.ident.filetype == MH_FILESET && isMainHeader)) \
-	{
-		for (auto &segment: header.segments) {
-			if ((segment.initprot == MACHO_VM_PROT_NONE) || (!segment.vmsize))
-				continue;
+	for (auto &segment: header.segments) {
+		if ((segment.initprot == MACHO_VM_PROT_NONE) || (!segment.vmsize))
+			continue;
 
-			uint32_t flags = 0;
-			if (segment.initprot & MACHO_VM_PROT_READ)
-				flags |= SegmentReadable;
-			if (segment.initprot & MACHO_VM_PROT_WRITE)
-				flags |= SegmentWritable;
-			if (segment.initprot & MACHO_VM_PROT_EXECUTE)
+		uint32_t flags = 0;
+		if (segment.initprot & MACHO_VM_PROT_READ)
+			flags |= SegmentReadable;
+		if (segment.initprot & MACHO_VM_PROT_WRITE)
+			flags |= SegmentWritable;
+		if (segment.initprot & MACHO_VM_PROT_EXECUTE)
+			flags |= SegmentExecutable;
+		if (((segment.initprot & MACHO_VM_PROT_WRITE) == 0) &&
+		    ((segment.maxprot & MACHO_VM_PROT_WRITE) == 0))
+			flags |= SegmentDenyWrite;
+		if (((segment.initprot & MACHO_VM_PROT_EXECUTE) == 0) &&
+		    ((segment.maxprot & MACHO_VM_PROT_EXECUTE) == 0))
+			flags |= SegmentDenyExecute;
+
+		// if we're positive we have an entry point for some reason, force the segment
+		// executable. this helps with kernel images.
+		for (auto &entryPoint: header.m_entryPoints)
+			if (segment.vmaddr <= entryPoint && (entryPoint < (segment.vmaddr + segment.filesize)))
 				flags |= SegmentExecutable;
-			if (((segment.initprot & MACHO_VM_PROT_WRITE) == 0) &&
-			    ((segment.maxprot & MACHO_VM_PROT_WRITE) == 0))
-				flags |= SegmentDenyWrite;
-			if (((segment.initprot & MACHO_VM_PROT_EXECUTE) == 0) &&
-			    ((segment.maxprot & MACHO_VM_PROT_EXECUTE) == 0))
-				flags |= SegmentDenyExecute;
 
-			// if we're positive we have an entry point for some reason, force the segment
-			// executable. this helps with kernel images.
-			for (auto &entryPoint: header.m_entryPoints)
-				if (segment.vmaddr <= entryPoint && (entryPoint < (segment.vmaddr + segment.filesize)))
-					flags |= SegmentExecutable;
-
-			AddAutoSegment(segment.vmaddr, segment.vmsize, segment.fileoff, segment.filesize, flags);
-		}
-		for (auto& section : header.sections)
-		{
-			char sectionName[17];
-			memcpy(sectionName, section.sectname, sizeof(section.sectname));
-			sectionName[16] = 0;
-			if (header.identifierPrefix.empty())
-				header.sectionNames.push_back(sectionName);
-			else
-				header.sectionNames.push_back(header.identifierPrefix + "::" + sectionName);
-		}
-
-		header.sectionNames = GetUniqueSectionNames(header.sectionNames);
+		AddAutoSegment(segment.vmaddr, segment.vmsize, segment.fileoff, segment.filesize, flags);
 	}
+	for (auto& section : header.sections)
+	{
+		char sectionName[17];
+		memcpy(sectionName, section.sectname, sizeof(section.sectname));
+		sectionName[16] = 0;
+		if (header.identifierPrefix.empty())
+			if (m_header.ident.filetype == MH_FILESET && isMainHeader)
+			{
+				string segmentName = section.segname;
+				header.sectionNames.push_back(segmentName + "." + section.sectname);
+			}
+			else
+			{
+				header.sectionNames.push_back(sectionName);
+			}
+		else
+			header.sectionNames.push_back(header.identifierPrefix + "::" + sectionName);
+	}
+
+	header.sectionNames = GetUniqueSectionNames(header.sectionNames);
 
 	for (size_t i = 0; i < header.sections.size(); i++)
 	{
